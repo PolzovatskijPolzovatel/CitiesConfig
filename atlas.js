@@ -360,7 +360,7 @@ function drawNaturalLayer(viewBox,k){
  const bathy=$('bathymetry');
  if(showBathymetry)prepareBathymetry();
  const showBathy=showBathymetry&&bathyBuilt;
- bathy.hidden=!showBathy;
+ if(showBathy)bathy.removeAttribute('hidden');else bathy.setAttribute('hidden','');
  $('depthKey').hidden=!showBathy;
  if(showBathy){
    bathy.setAttribute('viewBox',viewBox);
