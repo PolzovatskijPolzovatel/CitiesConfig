@@ -27,6 +27,8 @@ const TYPES={
  divide:{name:'Связь водоразделов',short:'Водораздел',tone:'#844d69',soft:'#f1e2eb',glyph:'<path d="m3 8 6 4-6 4m18-8-6 4 6 4M9 12h6"/>'},
  frontier:{name:'Природный рубеж',short:'Рубеж',tone:'#94640d',soft:'#f0e5cb',glyph:'<path d="M3 12h18M6 8v8m6-8v8m6-8v8"/>'},
  barrier:{name:'Барьер',short:'Барьер',tone:'#805238',soft:'#f1e7dd',glyph:'<path d="M3 12h18M5 16l4-4m1 4 4-4m1 4 4-4"/>'},
+ river:{name:'Река',short:'Река',tone:'#357e99',soft:'#e0eef4',glyph:'<path d="M6 3c12 5-12 10 4 18M17 4l-4 5"/>'},
+ lake:{name:'Озеро',short:'Озеро',tone:'#408caa',soft:'#deedf4',glyph:'<path d="M4 8 9 4l8 2 4 7-6 7-9-2-3-5Z" fill="currentColor" fill-opacity=".25"/>'},
  channel:{name:'Канал проницаемости',short:'Канал',tone:'#2f7182',soft:'#e0eef0',glyph:'<path d="M3 8h18M3 16h18" stroke-dasharray="3 2"/><path d="m13 10 3 2-3 2M7 12h9"/>'},
  massif:{name:'Массив',short:'Массив',tone:'#5b7050',soft:'#e7ecdb',glyph:'<path d="m3 18 6-11 4 6 3-4 5 9H3zM9 7l1-3"/>'},
  core:{name:'Ядро / узел',short:'Ядро',tone:'#386451',soft:'#e2ede4',glyph:'<circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3" fill="currentColor" stroke="none"/>'},
@@ -266,7 +268,7 @@ const MOUNTAIN_ROWS=[
 
 function expandGeometry([type,coordinates]){return {type,coordinates};}
 const WATER_LIBRARY=WATER_DATA.map(([kind,detail,rank,title,geometry,bounds],index)=>({
- id:'water-'+index,kind,detail,rank,title,bounds,type:'channel',geometry:expandGeometry(geometry)
+ id:'water-'+index,kind,detail,rank,title,bounds,type:kind==='river'?'river':'lake',geometry:expandGeometry(geometry)
 }));
 const MOUNTAIN_LIBRARY=MOUNTAIN_ROWS.map(([title,trace],index)=>({
  id:'mountain-'+index,kind:'mountain',title,type:'barrier',
@@ -323,7 +325,8 @@ function prepareBathymetry(){
    bathyBuilt=true;
    refresh();
  }).catch(()=>{
-   toast('Батиметрия не загрузилась');
+   bathyLoading=null;showBathymetry=false;$('showBathymetry').checked=false;
+   toast('Батиметрия не загрузилась. Включите слой для повторной попытки.');
  });
 }
 
@@ -341,7 +344,7 @@ function buildBathymetry(data){
    if(!grouped.has(depth))grouped.set(depth,[]);
    grouped.get(depth).push(projectedPath(expandGeometry(geometry)));
  }
- for(const [index,[depth,paths]] of [...grouped].entries()){
+ for(const [index,[depth,paths]] of [...grouped].sort((a,b)=>a[0]-b[0]).entries()){
    scene.append(svgNode('path',{d:paths.join(' '),fill:colors[Math.min(colors.length-1,index)],'fill-rule':'nonzero','data-depth':depth}));
  }
  defs.append(scene);svg.append(defs);
@@ -408,6 +411,7 @@ function setupNaturalPicker(item){
  }
  form.addNatural=id=>{
    if(!NATURAL_BY_ID.has(id)||state.natural.includes(id)||state.natural.length>=100)return;
+   state.excluded=state.excluded.filter(link=>link!==id);
    state.natural.push(id);
    query.value='';changed();
  };
@@ -453,17 +457,17 @@ function setupNaturalPicker(item){
    results.replaceChildren();
    if(results.hidden)return;
    const names=new Set();
-   const candidates=NATURAL_LIBRARY.filter(object=>!state.natural.includes(object.id)
+   const candidates=[...NATURAL_LIBRARY,...items.filter(object=>object.geometry&&['river','lake'].includes(object.type)).map(object=>({...object,kind:object.type}))].filter(object=>!state.natural.includes(object.id)&&!state.related.includes(object.id)
      &&(kind.value==='all'||kind.value===object.kind||kind.value==='older'&&['historic','pluvial','playa'].includes(object.kind))
      &&object.title.toLocaleLowerCase('ru').includes(text));
    for(const object of candidates){
      if(results.children.length>=35)break;
-     const key=object.kind+':'+object.title;
+     const key=object.kind+':'+object.title+':'+object.id;
      if(names.has(key))continue;
      names.add(key);
      const button=document.createElement('button');
      button.type='button';button.textContent=object.title+' · '+catalogNames[object.kind];
-     button.onclick=()=>form.addNatural(object.id);
+     button.onclick=()=>NATURAL_BY_ID.has(object.id)?form.addNatural(object.id):form.toggleRelation(object.id);
      results.append(button);
    }
    if(!results.children.length)results.textContent='Нет результатов';
@@ -789,11 +793,12 @@ const BUILTIN_FEATURES = FEATURE_ROWS.map(([nodes,type,title,trace,area],index)=
  const points=trace.split(' ').map(pair=>pair.split(',').map(Number));
  const links=nodes.split(' ').map(id=>['passau','glasgow','sarajevo'].includes(id)?id:'lec-'+id);
  const matched=title==='Нил'?WATER_MATCHES.nile:title==='Розеттский рукав'?WATER_MATCHES.rosetta:WATER_MATCHES[nodes+'|'+title];
- const geometry=matched?expandGeometry(matched):area
+ const fullLake=title==='Верхнее озеро'?WATER_LIBRARY.find(object=>object.kind==='lake'&&object.title==='Верхнее озеро'):null;
+ const geometry=fullLake?fullLake.geometry:matched?expandGeometry(matched):area
    ?{type:'Polygon',coordinates:[[...points,points[0]]]}
    :{type:'LineString',coordinates:points};
- return {id:'spatial-'+index,title,type,links,geometry};
-});
+ return {id:'spatial-'+index,title,type:fullLake?'lake':type,links,geometry};
+}).filter(feature=>feature.title!=='Крокодиловая река');
 
 const MARINE_SOURCES={
  'lec-alexandria':['Перенос наносов у Нила','https://ejournals.epublishing.ekt.gr/index.php/hcmr-med-mar-sc/article/view/12124'],
@@ -983,7 +988,7 @@ function drawTiles(){
 
 ;
 const GEOMETRY_TYPES = new Set(['Point','MultiPoint','LineString','MultiLineString','Polygon','MultiPolygon','GeometryCollection']);
-const LINE_TYPES = new Set(['barrier','channel','massif','vector','current','frontier']);
+const LINE_TYPES = new Set(['river','lake','barrier','channel','massif','vector','current','frontier']);
 const SVG = 'http://www.w3.org/2000/svg';
 function readGeometry(geometry, budget={points:100000}, depth=0){
  if(!geometry||!GEOMETRY_TYPES.has(geometry.type)||depth>8)throw Error('Некорректная геометрия');
@@ -1162,6 +1167,35 @@ function relatedDiagram(item){
 }
 
 ;
+function importedType(properties,geometry){
+ if(Object.hasOwn(TYPES,properties.type))return properties.type;
+ const name=String(properties.name||properties.title||'');
+ const tags=properties.tags||{};
+ const waterway=properties.waterway||tags.waterway;
+ const water=properties.water||tags.water;
+ if(geometry.type.includes('Line')&&(waterway==='river'||waterway==='stream'||/river|rivier|река/i.test(name)))return 'river';
+ if(geometry.type.includes('Polygon')&&(water==='lake'||water==='reservoir'||properties.natural==='water'||tags.natural==='water'||/lake|озеро|водохранилище/i.test(name)))return 'lake';
+ return /Point$/.test(geometry.type)?'core':geometry.type.includes('Polygon')?'massif':'channel';
+}
+function mergeImportedRivers(features){
+ const groups=new Map(),result=[];
+ for(const feature of features){
+   const properties=feature?.properties||{},geometry=feature?.geometry;
+   if(!geometry||!['LineString','MultiLineString'].includes(geometry.type)||importedType(properties,geometry)!=='river'||!String(properties.name||properties.title||'').trim()){
+     result.push(feature);continue;
+   }
+   const key=JSON.stringify([properties.name||properties.title,properties.place||'',properties.article||properties.description||'']);
+   let group=groups.get(key);
+   if(!group){group={...feature,properties:{...properties,type:'river'},geometry:{type:'MultiLineString',coordinates:[]}};groups.set(key,group);result.push(group);}
+   const lines=geometry.type==='LineString'?[geometry.coordinates]:geometry.coordinates;
+   if(Array.isArray(lines))group.geometry.coordinates.push(...lines);
+ }
+ for(const group of groups.values()){
+   const lines=new Map(group.geometry.coordinates.map(line=>[JSON.stringify(line),line]));
+   group.geometry.coordinates=[...lines.values()];
+ }
+ return result;
+}
 function parseGeoJSON(input){
  if(input?.crs&& !/4326|CRS84/i.test(input.crs.properties?.name||''))throw Error('Нужны координаты WGS 84');
  let features;
@@ -1169,6 +1203,8 @@ function parseGeoJSON(input){
  else if(input?.type==='Feature')features=[input];
  else if(GEOMETRY_TYPES.has(input?.type))features=[{geometry:input}];
  else throw Error('Файл не является GeoJSON');
+ if(features.length>10000)throw Error('Импорт поддерживает до 10 000 геометрий за раз');
+ features=mergeImportedRivers(features);
  if(features.length>400)throw Error('Импорт поддерживает до 400 объектов за раз');
  const remaining=400-items.length;
  const budget={points:100000};
@@ -1180,8 +1216,7 @@ function parseGeoJSON(input){
      const geometry=readGeometry(feature?.geometry,budget);
      const [lon,lat]=geometryAnchor(geometry);
      const properties=feature.properties&&typeof feature.properties==='object'?feature.properties:{};
-     const defaultType=/Point$/.test(geometry.type)?'core':geometry.type.includes('Polygon')?'massif':'channel';
-     const type=Object.hasOwn(TYPES,properties.type)?properties.type:defaultType;
+     const type=importedType(properties,geometry);
      const title=String(properties.name||properties.title||TYPES[type].name).trim().slice(0,100)||TYPES[type].name;
      const place=String(properties.place||'').trim().slice(0,100);
      const article=typeof properties.article==='string'?cleanHTML(properties.article):typeof properties.description==='string'?'<p>'+esc(properties.description.slice(0,4000))+'</p>':'';
@@ -1944,12 +1979,58 @@ $('insertForm').onsubmit=async e=>{
  dirty=true;
 };
 function onControl(el){return !!el.closest('button,a,.popover,[data-feature]');}
+const touchPointers=new Map();
+let pinchGesture=null;
+let suppressMapClickUntil=0;
+function beginPinch(){
+ const [first,second]=[...touchPointers.values()];
+ const rect=map.getBoundingClientRect();
+ const x=(first.x+second.x)/2-rect.left,y=(first.y+second.y)/2-rect.top;
+ const k=vis.base*vis.zoom;
+ pinchGesture={distance:Math.max(1,Math.hypot(second.x-first.x,second.y-first.y)),zoom:vis.zoom,
+   lon:vis.lon+(x-vis.width/2)/k,y:vis.y+(y-vis.height/2)/k};
+ pointer=null;clearNaturalHover();suppressMapClickUntil=Date.now()+600;
+}
+function movePinch(){
+ const [first,second]=[...touchPointers.values()];
+ const rect=map.getBoundingClientRect();
+ const x=(first.x+second.x)/2-rect.left,y=(first.y+second.y)/2-rect.top;
+ vis.zoom=clamp(pinchGesture.zoom*Math.hypot(second.x-first.x,second.y-first.y)/pinchGesture.distance,.19,720);
+ const k=vis.base*vis.zoom;
+ vis.lon=wrap(pinchGesture.lon-(x-vis.width/2)/k);
+ vis.y=clamp(pinchGesture.y-(y-vis.height/2)/k,-150,150);
+ suppressMapClickUntil=Date.now()+600;refresh();
+}
+function endTouch(e){
+ if(!touchPointers.delete(e.pointerId))return false;
+ if(!pinchGesture)return false;
+ suppressMapClickUntil=Date.now()+600;
+ if(touchPointers.size>=2){beginPinch();return true;}
+ pinchGesture=null;
+ const [remaining]=touchPointers.entries();
+ pointer=remaining?{id:remaining[0],x:remaining[1].x,y:remaining[1].y,lon:vis.lon,mY:vis.y,dragged:true}:null;
+ map.classList.toggle('grabbing',Boolean(pointer));
+ return true;
+}
+map.addEventListener('click',e=>{
+ if(Date.now()<suppressMapClickUntil){e.preventDefault();e.stopImmediatePropagation();}
+},true);
 map.addEventListener('pointerdown',e=>{
- if(e.button!==0||pointer||onControl(e.target))return;
+ if(e.button!==0||onControl(e.target))return;
+ if(e.pointerType==='touch'){
+   touchPointers.set(e.pointerId,{x:e.clientX,y:e.clientY});
+   map.setPointerCapture(e.pointerId);
+   if(touchPointers.size>=2){beginPinch();return;}
+ }
+ if(pointer)return;
  pointer={id:e.pointerId,x:e.clientX,y:e.clientY,lon:vis.lon,mY:vis.y,dragged:false};
  map.setPointerCapture(e.pointerId); map.classList.add('grabbing');
 });
 map.addEventListener('pointermove',e=>{
+ if(touchPointers.has(e.pointerId)){
+   touchPointers.set(e.pointerId,{x:e.clientX,y:e.clientY});
+   if(pinchGesture){movePinch();return;}
+ }
  if(!pointer&&naturalPicking){
    const rect=map.getBoundingClientRect();
    showNaturalHover(e.clientX-rect.left,e.clientY-rect.top,e.altKey);
@@ -1962,6 +2043,7 @@ map.addEventListener('pointermove',e=>{
  vis.lon=wrap(pointer.lon-dx/k);vis.y=clamp(pointer.mY-dy/k,-150,150);refresh();
 });
 map.addEventListener('pointerup',e=>{
+ if(endTouch(e))return;
  if(pointer?.id!==e.pointerId)return;
  const wasDrag=pointer.dragged;pointer=null;map.classList.remove('grabbing');
  if(wasDrag||mode!=='edit')return;
@@ -1975,8 +2057,12 @@ map.addEventListener('pointerup',e=>{
  handleMapPosition(pos.lon,pos.lat);
 });
 map.addEventListener('pointerleave',clearNaturalHover);
-map.addEventListener('pointercancel',()=>{pointer=null;map.classList.remove('grabbing');});
-map.addEventListener('lostpointercapture',()=>{pointer=null;map.classList.remove('grabbing');});
+function cancelMapPointer(e){
+ if(endTouch(e))return;
+ if(pointer?.id===e.pointerId){pointer=null;map.classList.remove('grabbing');}
+}
+map.addEventListener('pointercancel',cancelMapPointer);
+map.addEventListener('lostpointercapture',cancelMapPointer);
 map.addEventListener('wheel',e=>{
  if(onControl(e.target))return;
  e.preventDefault();clearNaturalHover();const r=map.getBoundingClientRect();const delta=e.deltaY*(e.deltaMode===1?18:1);
@@ -2006,6 +2092,8 @@ $('plus').onclick=()=>zoomBy(1.55);$('minus').onclick=()=>zoomBy(1/1.55);
 $('modeButton').onclick=()=>setMode(mode==='edit'?'view':'edit');
 const drawingTools=[
  {key:'core',type:'core',label:'Город',geometry:'point'},
+ {key:'river',type:'river',label:'Река',geometry:'line'},
+ {key:'lake',type:'lake',label:'Озеро',geometry:'area'},
  {key:'barrier',type:'barrier',label:'Барьер',geometry:'line'},
  {key:'channel',type:'channel',label:'Канал',geometry:'line'},
  {key:'massif',type:'massif',label:'Массив',geometry:'area'},
@@ -2033,7 +2121,7 @@ $('drawConfig').onclick=()=>{
 $('beginConfig').onclick=()=>startDrawing($('configType').value,$('configShape').value==='area',null,'config');
 $('spatial').addEventListener('click',e=>{
  const feature=e.target.closest('[data-feature]');
- if(feature)selectItem(feature.dataset.feature);
+ if(feature){if(naturalPicking)$('editorForm')?.toggleRelation?.(feature.dataset.feature);else selectItem(feature.dataset.feature);}
 });
 $('legendPop').innerHTML=Object.entries(TYPES).map(([key,type])=>'<div class="legend-line" '+tone(key)+'><span class="finder-dot" aria-hidden="true"></span>'+glyph(key)+type.name+'</div>').join('');
 $('baseChoices').innerHTML=Object.entries(BASEMAPS).map(([key,value])=>'<button type="button" data-base="'+key+'" aria-pressed="false">'+value.label+'</button>').join('');
