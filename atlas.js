@@ -28,11 +28,10 @@ const TYPES={
  frontier:{name:'Природный рубеж',short:'Рубеж',tone:'#94640d',soft:'#f0e5cb',glyph:'<path d="M3 12h18M6 8v8m6-8v8m6-8v8"/>'},
  barrier:{name:'Барьер',short:'Барьер',tone:'#805238',soft:'#f1e7dd',glyph:'<path d="M3 12h18M5 16l4-4m1 4 4-4m1 4 4-4"/>'},
  river:{name:'Река',short:'Река',tone:'#357e99',soft:'#e0eef4',glyph:'<path d="M6 3c12 5-12 10 4 18M17 4l-4 5"/>'},
- lake:{name:'Озеро',short:'Озеро',tone:'#408caa',soft:'#deedf4',glyph:'<path d="M4 8 9 4l8 2 4 7-6 7-9-2-3-5Z" fill="currentColor" fill-opacity=".25"/>'},
+ lake:{name:'Водный объект',short:'Водный объект',tone:'#408caa',soft:'#deedf4',glyph:'<path d="M4 8 9 4l8 2 4 7-6 7-9-2-3-5Z" fill="currentColor" fill-opacity=".25"/>'},
  channel:{name:'Канал проницаемости',short:'Канал',tone:'#2f7182',soft:'#e0eef0',glyph:'<path d="M3 8h18M3 16h18" stroke-dasharray="3 2"/><path d="m13 10 3 2-3 2M7 12h9"/>'},
  massif:{name:'Массив',short:'Массив',tone:'#5b7050',soft:'#e7ecdb',glyph:'<path d="m3 18 6-11 4 6 3-4 5 9H3zM9 7l1-3"/>'},
  core:{name:'Ядро / узел',short:'Ядро',tone:'#386451',soft:'#e2ede4',glyph:'<circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3" fill="currentColor" stroke="none"/>'},
- current:{name:'Морской перенос наносов',short:'Морское течение',tone:'#166c8c',soft:'#d9edf4',glyph:'<path d="M3 10c4-4 7 4 11 0l5-4m-5 0h5v5M3 17c4-4 7 4 11 0"/>'},
  vector:{name:'Вектор связи',short:'Вектор',tone:'#42677a',soft:'#e2ebf0',glyph:'<path d="M4 18 19 5m-7 0h7v7"/>'}
 };
 const EXAMPLES=[
@@ -206,6 +205,20 @@ const LECTURES=[...LECTURE_ROWS,...EXTRA_LECTURE_ROWS].map(([name,type,title,pla
 const EXTRA_LECTURE_IDS=new Set(EXTRA_LECTURE_ROWS.map(([id])=>'lec-'+id));
 const STARTERS=[...EXAMPLES,...LECTURES];
 
+const ADDITIONAL_CONFIGURATIONS={
+ 'lec-samara':[
+  {type:'u',article:'<p>В эксперименте с волжской траекторией Рогачёв выделяет район Самары как фокальную точку крупного поворота реки. К обращённой в глубь суши части изгиба сходятся кратчайшие пути из обширного сектора территории. Такое положение дополняет роль Самары на природном рубеже.</p><p>Лекция 6, пример 63, с. 22–29.</p>'}
+ ],
+ 'lec-kazan':[
+  {type:'frontier',article:'<p>Рогачёв относит Казань к городам на рубеже смешанного леса и тайги. Различия природных сред создают взаимодополняющие ресурсы и обмен, а город становится узлом связей вдоль этого рубежа и поперёк него.</p><p>Лекция 5, пример 47, с. 4–6.</p>'},
+  {type:'u',article:'<p>В эксперименте с волжской траекторией район Казани выделяется как один из фокусов кратчайших подходов к реке. Геометрия крупного изгиба собирает связи обширной территории и дополняет положение у подхода к слиянию Волги и Камы.</p><p>Лекция 6, пример 63, с. 22–29.</p>'}
+ ]
+};
+for(const city of STARTERS){
+ const sections=ADDITIONAL_CONFIGURATIONS[city.id];
+ if(sections){city.types=[city.type,...sections.map(section=>section.type)];city.sections=structuredClone(sections);}
+}
+
 ;
 // Generalized axes of mountain ranges. They describe extent, not administrative boundaries.
 const MOUNTAIN_ROWS=[
@@ -274,8 +287,42 @@ const MOUNTAIN_LIBRARY=MOUNTAIN_ROWS.map(([title,trace],index)=>({
  id:'mountain-'+index,kind:'mountain',title,type:'barrier',
  geometry:{type:'LineString',coordinates:trace.split(' ').map(pair=>pair.split(',').map(Number))}
 }));
-const NATURAL_LIBRARY=[...MOUNTAIN_LIBRARY,...WATER_LIBRARY.filter(feature=>feature.title)];
-const NATURAL_BY_ID=new Map(NATURAL_LIBRARY.map(feature=>[feature.id,feature]));
+function buildFullRivers(){
+ const byName=new Map();
+ for(const feature of WATER_LIBRARY.filter(object=>object.kind==='river'&&object.title)){
+   if(!byName.has(feature.title))byName.set(feature.title,[]);
+   byName.get(feature.title).push(feature);
+ }
+ const full=[];
+ for(const [title,parts] of byName){
+   const groups=[];
+   for(const part of parts){
+     const touching=groups.filter(group=>part.bounds[0]<=group.bounds[2]+.25&&part.bounds[2]>=group.bounds[0]-.25&&part.bounds[1]<=group.bounds[3]+.25&&part.bounds[3]>=group.bounds[1]-.25);
+     const merged=[part,...touching.flatMap(group=>group.parts)];
+     for(const group of touching)groups.splice(groups.indexOf(group),1);
+     groups.push({parts:merged,bounds:[Math.min(...merged.map(x=>x.bounds[0])),Math.min(...merged.map(x=>x.bounds[1])),Math.max(...merged.map(x=>x.bounds[2])),Math.max(...merged.map(x=>x.bounds[3]))]});
+   }
+   for(const group of groups){
+     const first=group.parts.reduce((best,part)=>Number(part.id.slice(6))<Number(best.id.slice(6))?part:best);
+     full.push({id:'river-full-'+first.id.slice(6),kind:'river',type:'river',title,bounds:group.bounds,fullRiver:true,
+       parts:group.parts.map(part=>part.id),geometry:{type:'MultiLineString',coordinates:group.parts.flatMap(part=>part.geometry.type==='LineString'?[part.geometry.coordinates]:part.geometry.coordinates)}});
+   }
+ }
+ return full;
+}
+const FULL_RIVERS=buildFullRivers();
+const FULL_RIVER_BY_PART=new Map(FULL_RIVERS.flatMap(river=>river.parts.map(id=>[id,river])));
+function fullRiverFor(feature){
+ if(feature.fullRiver)return feature;
+ if(FULL_RIVER_BY_PART.has(feature.id))return FULL_RIVER_BY_PART.get(feature.id);
+ if(!['river','channel'].includes(feature.type))return null;
+ const matches=FULL_RIVERS.filter(river=>river.title.toLocaleLowerCase('ru')===feature.title.toLocaleLowerCase('ru'));
+ if(!matches.length)return null;
+ const bounds=coordinatesBounds(geometryParts(feature.geometry).flatMap(part=>part.paths?.flat()||[part.point]));
+ return matches.find(river=>bounds[0]<=river.bounds[2]&&bounds[2]>=river.bounds[0]&&bounds[1]<=river.bounds[3]&&bounds[3]>=river.bounds[1])||null;
+}
+const NATURAL_LIBRARY=[...MOUNTAIN_LIBRARY,...WATER_LIBRARY.filter(feature=>feature.title&&feature.kind!=='river'),...FULL_RIVERS];
+const NATURAL_BY_ID=new Map([...WATER_LIBRARY.filter(feature=>feature.title),...NATURAL_LIBRARY].map(feature=>[feature.id,feature]));
 const catalogNames={river:'Река / русло',lake:'Озеро',historic:'Историческое озеро',pluvial:'Палеоозеро',playa:'Сухое озеро',mountain:'Горный хребет'};
 let showWater=true,showMountains=true;
 
@@ -407,10 +454,19 @@ function setupNaturalPicker(item){
  form.readRelations=()=>state;
  function changed(){
    dirty=true;
-   renderChips();renderResults();renderSpatial();
+   renderChips();renderResults();renderSpatial();form.renderSchemePreview?.();
  }
  form.addNatural=id=>{
+   const full=FULL_RIVER_BY_PART.get(id);if(full)id=full.id;
    if(!NATURAL_BY_ID.has(id)||state.natural.includes(id)||state.natural.length>=100)return;
+   const target=NATURAL_BY_ID.get(id);
+   if(target.fullRiver){
+     for(const old of relatedShapes(item,state,true)){
+       if(old.id===id||fullRiverFor(old)?.id!==id)continue;
+       state.natural=state.natural.filter(link=>link!==old.id);state.related=state.related.filter(link=>link!==old.id);
+       if(inheritedShapes(item).some(shape=>shape.id===old.id)&&!state.excluded.includes(old.id))state.excluded.push(old.id);
+     }
+   }
    state.excluded=state.excluded.filter(link=>link!==id);
    state.natural.push(id);
    query.value='';changed();
@@ -418,6 +474,7 @@ function setupNaturalPicker(item){
  form.toggleRelation=id=>{
    if(NATURAL_BY_ID.has(id)){
      if(state.natural.includes(id)){state.natural=state.natural.filter(link=>link!==id);changed();}
+     else if(state.natural.includes(FULL_RIVER_BY_PART.get(id)?.id)){state.natural=state.natural.filter(link=>link!==FULL_RIVER_BY_PART.get(id).id);changed();}
      else form.addNatural(id);
      return;
    }
@@ -440,15 +497,21 @@ function setupNaturalPicker(item){
  };
  function renderChips(){
    chips.replaceChildren();
-   const entries=relatedShapes(item,state).map(object=>[object.title,()=>form.toggleRelation(object.id)]);
+   const objects=relatedShapes(item,state);
+   const entries=objects.map(object=>[object.title,()=>form.toggleRelation(object.id),object]);
    for(const id of state.peers){
      const city=items.find(candidate=>candidate.id===id);
      if(city)entries.push([city.title,()=>form.togglePeer(id)]);
    }
-   for(const [title,toggle] of entries){
+   for(const [title,toggle,object] of entries){
      const button=document.createElement('button');
      button.type='button';button.textContent=title+' ×';button.title='Убрать связь';
      button.onclick=toggle;chips.append(button);
+     const full=object&&fullRiverFor(object);
+     if(full&&full.id!==object.id){
+       const expand=document.createElement('button');expand.type='button';expand.textContent='Целиком';expand.setAttribute('aria-label','Показать целиком · '+title);
+       expand.onclick=()=>form.addNatural(full.id);chips.append(expand);
+     }
    }
  }
  function renderResults(){
@@ -466,7 +529,7 @@ function setupNaturalPicker(item){
      if(names.has(key))continue;
      names.add(key);
      const button=document.createElement('button');
-     button.type='button';button.textContent=object.title+' · '+catalogNames[object.kind];
+     button.type='button';button.textContent=object.title+' · '+(object.fullRiver?'Полная река':catalogNames[object.kind]);
      button.onclick=()=>NATURAL_BY_ID.has(object.id)?form.addNatural(object.id):form.toggleRelation(object.id);
      results.append(button);
    }
@@ -782,12 +845,12 @@ const FEATURE_ROWS = [
  ['addis','vector','К долине Голубого Нила','38.74,9.03 37.89,10.31 37.38,11.60'],
  ['addis','vector','К Красному морю','38.74,9.03 40.79,10.41 43.14,11.6'],
  ['addis','vector','К Индийскому океану','38.74,9.03 41.15,8.0 45.34,2.04'],
- ['alexandria portsaid','current','Прибрежный перенос Нила на восток','30.42,31.56 30.87,31.69 31.34,31.68 31.87,31.60 32.19,31.49'],
- ['venice','current','Западно-Адриатическое течение к югу','12.62,44.98 12.65,44.71 12.77,44.48 13.02,44.23'],
- ['marseille toulon','current','Шлейф Роны к западу и юго-западу','4.84,43.30 4.68,43.20 4.46,43.12 4.21,43.00'],
- ['baku','current','Модель прибрежного переноса Куры к югу','49.45,39.35 49.39,39.20 49.22,39.07 49.07,38.86'],
- ['hochiminh','current','Зимний перенос наносов Меконга к Камау','106.62,9.94 106.25,9.61 105.84,9.25 105.40,8.94 104.93,8.64'],
- ['karachi','current','Перенос шлейфа Инда к юго-востоку при летнем муссоне','67.49,23.97 67.69,23.76 67.95,23.56 68.18,23.33'],
+ ['alexandria portsaid','vector','Прибрежный перенос Нила на восток','30.42,31.56 30.87,31.69 31.34,31.68 31.87,31.60 32.19,31.49'],
+ ['venice','vector','Западно-Адриатическое течение к югу','12.62,44.98 12.65,44.71 12.77,44.48 13.02,44.23'],
+ ['marseille toulon','vector','Шлейф Роны к западу и юго-западу','4.84,43.30 4.68,43.20 4.46,43.12 4.21,43.00'],
+ ['baku','vector','Модель прибрежного переноса Куры к югу','49.45,39.35 49.39,39.20 49.22,39.07 49.07,38.86'],
+ ['hochiminh','vector','Зимний перенос наносов Меконга к Камау','106.62,9.94 106.25,9.61 105.84,9.25 105.40,8.94 104.93,8.64'],
+ ['karachi','vector','Перенос шлейфа Инда к юго-востоку при летнем муссоне','67.49,23.97 67.69,23.76 67.95,23.56 68.18,23.33'],
 ];
 const BUILTIN_FEATURES = FEATURE_ROWS.map(([nodes,type,title,trace,area],index)=>{
  const points=trace.split(' ').map(pair=>pair.split(',').map(Number));
@@ -1066,7 +1129,7 @@ function renderSpatial(){
  if(drawing?.points.length){
    const points=drawing.points.slice();
    if(drawing.cursor)points.push(drawing.cursor);
-   if(points.length>1)shapes.push({id:'draft-shape',type:drawing.type,geometry:{type:'LineString',coordinates:points}});
+   if(points.length>1)shapes.push({id:'draft-shape',type:drawing.type,geometry:{type:drawing.area&&points.length>=3?'Polygon':'LineString',coordinates:drawing.area&&points.length>=3?[points]:points}});
  }
  const highlighted=shape=>shape.id==='draft-shape'||shape.id===current?.id||selectedShapes.has(shape.id)||Boolean(current?.links?.includes(shape.id));
  const overlay=document.createDocumentFragment();
@@ -1087,7 +1150,11 @@ function renderSpatial(){
      }
      const d=part.paths.map(path=>pathFor(path,part.area)).join(' ');
      const path=svgNode('path',{d,class:part.area?'area':'line','fill-rule':'evenodd'});
-     group.append(path);
+     if(shape.type==='lake'&&part.area&&(isCustom||shape.id==='draft-shape')){
+       path.setAttribute('class','water-fill');group.append(path);
+       const open=openWaterPaths(part.paths).map(ring=>pathFor(ring,false)).join(' ');
+       group.append(svgNode('path',{d:open,class:'line'}));
+     }else group.append(path);
      if(isCustom&&!drawing&&!moving){
        const hit=svgNode('path',{d,class:part.area?'feature-hit inside':'feature-hit','fill-rule':'evenodd','data-feature':shape.id,'aria-hidden':'true'});
        group.append(hit);
@@ -1125,7 +1192,7 @@ function renderSpatial(){
 
 function relatedDiagram(item){
  const linked=[...relatedShapes(item),...(item.geometry&&item.geometry.type!=='Point'?[item]:[])];
- const peers=(item.peers||[]).map(id=>items.find(city=>city.id===id)).filter(isCity);
+ const peers=(itemRelations(item).peers||[]).map(id=>items.find(city=>city.id===id)).filter(isCity);
  if(!linked.length&&!peers.length)return '';
  const traces=[];
  for(const feature of linked){
@@ -1144,7 +1211,7 @@ function relatedDiagram(item){
  for(const peer of peers){
    const [x,y]=project([peer.lon,peer.lat]);minX=Math.min(minX,x);maxX=Math.max(maxX,x);minY=Math.min(minY,y);maxY=Math.max(maxY,y);
  }
- const scale=Math.min(276/Math.max(.001,maxX-minX),96/Math.max(.001,maxY-minY));
+ const scale=Math.min(276/Math.max(.001,maxX-minX),96/Math.max(.001,maxY-minY))*clamp(Number(item.schemeZoom)||1,.35,3);
  const position=coord=>{
    const [x,y]=project(coord);
    return [(155+(x-(minX+maxX)/2)*scale).toFixed(2),(61+(y-(minY+maxY)/2)*scale).toFixed(2)];
@@ -1152,14 +1219,18 @@ function relatedDiagram(item){
  const paths=traces.map(({feature,paths,area})=>{
    const d=paths.map(path=>path.map((coord,i)=>(i?'L':'M')+position(coord).join(' ')).join(' ')+(area?'Z':'')).join(' ');
    const color=TYPES[feature.type].tone;
+   if(feature.type==='lake'&&area&&feature.article!==undefined){
+     const outline=openWaterPaths(paths).map(path=>path.map((coord,i)=>(i?'L':'M')+position(coord).join(' ')).join(' ')).join(' ');
+     return '<path d="'+d+'" fill="'+color+'" fill-opacity=".25" fill-rule="evenodd"/><path d="'+outline+'" fill="none" stroke="'+color+'" stroke-width="1.8"/>';
+   }
    const dash=['barrier','frontier','vector','current'].includes(feature.type)?' stroke-dasharray="5 3"':'';
    return '<path d="'+d+'" stroke="'+color+'" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" fill="'+(area?color:'none')+'" fill-opacity=".2" fill-rule="evenodd"'+dash+(['vector','current'].includes(feature.type)&&!area?' marker-end="url(#scheme-arrow)"':'')+'><title>'+esc(feature.title)+'</title></path>';
  }).join('');
  const [x,y]=position([item.lon,item.lat]);
- const node=isCity(item)?'<circle cx="'+x+'" cy="'+y+'" r="4.4" fill="'+TYPES[item.type].tone+'" stroke="#fff" stroke-width="1.4"/>':'';
+ const node=isCity(item)?diagramNode(item,x,y,4.4):'';
  const otherCities=peers.map(peer=>{
    const [x,y]=position([peer.lon,peer.lat]);
-   return '<circle cx="'+x+'" cy="'+y+'" r="3.4" opacity=".45" fill="'+TYPES[peer.type].tone+'" stroke="#fff" stroke-width="1.1"><title>'+esc(peer.title)+'</title></circle>';
+   return diagramNode(peer,x,y,3.4,.45);
  }).join('');
  const objects=[...new Map(traces.map(({feature})=>[feature.title,feature])).values()];
  const key=objects.map(feature=>'<span class="key-item"><i style="background:'+TYPES[feature.type].tone+'"></i>'+esc(feature.title)+'</span>').join('');
@@ -1168,7 +1239,7 @@ function relatedDiagram(item){
 
 ;
 function importedType(properties,geometry){
- if(Object.hasOwn(TYPES,properties.type))return properties.type;
+ if(Object.hasOwn(TYPES,canonicalType(properties.type)))return canonicalType(properties.type);
  const name=String(properties.name||properties.title||'');
  const tags=properties.tags||{};
  const waterway=properties.waterway||tags.waterway;
@@ -1213,10 +1284,11 @@ function parseGeoJSON(input){
  for(const feature of features){
    if(imported.length>=remaining){skipped++;continue;}
    try{
-     const geometry=readGeometry(feature?.geometry,budget);
+     let geometry=readGeometry(feature?.geometry,budget);
      const [lon,lat]=geometryAnchor(geometry);
      const properties=feature.properties&&typeof feature.properties==='object'?feature.properties:{};
      const type=importedType(properties,geometry);
+     if(type==='lake')geometry=waterArea(geometry);
      const title=String(properties.name||properties.title||TYPES[type].name).trim().slice(0,100)||TYPES[type].name;
      const place=String(properties.place||'').trim().slice(0,100);
      const article=typeof properties.article==='string'?cleanHTML(properties.article):typeof properties.description==='string'?'<p>'+esc(properties.description.slice(0,4000))+'</p>':'';
@@ -1366,7 +1438,7 @@ function mergeAtlasRows(base,local,remote){
    for(const key of new Set([...Object.keys(previous),...Object.keys(draft)])){
      if(sameValue(previous[key],draft[key]))continue;
      if(!sameValue(previous[key],latest[key])&&!sameValue(draft[key],latest[key])){
-       if(['cities','natural','related','excluded','peers','links'].includes(key)&&[previous[key],draft[key],latest[key]].every(Array.isArray)){
+       if(['types','cities','natural','related','excluded','peers','links'].includes(key)&&[previous[key],draft[key],latest[key]].every(Array.isArray)){
          const kept=new Set(latest[key]);
          for(const id of previous[key])if(!draft[key].includes(id))kept.delete(id);
          for(const id of draft[key])if(!previous[key].includes(id))kept.add(id);
@@ -1463,7 +1535,7 @@ async function syncAtlas(notify=false){
    if(notify)toast('Атлас обновляется. Сохранение будет повторено.');
  }catch(error){
    if(error.message==='conflict'){
-     if(!conflictNotified){toast('Ту же карточку уже изменили. Ваши правки сохранены на этом устройстве.');conflictNotified=true;}
+     if(!conflictNotified){toast('Этот объект уже изменили. Ваши правки сохранены на этом устройстве.');conflictNotified=true;}
    }else if(notify)toast('Общий атлас недоступен. Правки ждут синхронизации.');
  }finally{sharedRunning=false;}
 }
@@ -1478,6 +1550,153 @@ function startSharedAtlas(){
  setInterval(syncAtlas,10000);
  window.addEventListener('focus',()=>syncAtlas());
  window.addEventListener('online',()=>syncAtlas(true));
+}
+
+;
+const CITY_TYPES=Object.keys(TYPES).filter(type=>!LINE_TYPES.has(type)||type==='frontier');
+const canonicalType=type=>type==='current'?'vector':type;
+function configurationTypes(item){
+ return [...new Set([item.type,...(Array.isArray(item.types)?item.types:[])].map(canonicalType))].filter(type=>Object.hasOwn(TYPES,type));
+}
+function configurationSections(item){
+ const types=configurationTypes(item);
+ return types.map(type=>({type,article:type===item.type?item.article||'':item.sections?.find(section=>section.type===type)?.article||''}));
+}
+function configurationHeading(type){
+ return '<div class="configuration-heading" '+tone(type)+'>'+glyph(type)+'<span>'+esc(TYPES[type].name)+'</span></div>';
+}
+function markerColor(item){
+ const colors=configurationTypes(item).map(type=>TYPES[type].tone);
+ if(colors.length<2)return colors[0];
+ return 'conic-gradient('+colors.map((color,index)=>color+' '+index*100/colors.length+'% '+(index+1)*100/colors.length+'%').join(',')+')';
+}
+function articleSections(item){
+ return configurationSections(item).map(({type,article},index)=>'<section class="configuration-section">'+(index?configurationHeading(type):'')+'<div class="article-body">'+article+'</div></section>').join('');
+}
+function setupConfigurationEditor(item){
+ const panel=$('configurationControls'),form=$('editorForm');
+ if(!panel)return;
+ const selectedTypes=new Set(configurationTypes(item));
+ const drafts=new Map(configurationSections(item).map(section=>[section.type,section.article]));
+ let primary=item.type;
+ panel.innerHTML='<fieldset class="configuration-types"><legend>Типы конфигураций</legend>'+CITY_TYPES.map(type=>'<label '+tone(type)+'><input type="checkbox" value="'+type+'"'+(selectedTypes.has(type)?' checked':'')+'>'+glyph(type)+TYPES[type].name+'</label>').join('')+'</fieldset>';
+ const sections=$('additionalArticles');
+ function readDrafts(){
+   drafts.set(primary,$('editorText').innerHTML);
+   for(const editor of sections.querySelectorAll('[data-section-type]'))drafts.set(editor.dataset.sectionType,editor.innerHTML);
+ }
+ function renderSections(){
+   sections.innerHTML=[...selectedTypes].filter(type=>type!==primary).map(type=>'<section class="configuration-section">'+configurationHeading(type)+editorToolbar()+'<div id="editorText-'+type+'" data-section-type="'+type+'" role="textbox" aria-label="Текст статьи · '+esc(TYPES[type].name)+'" aria-multiline="true" class="article-body editable" contenteditable="true" data-placeholder="Опишите этот тип положения…">'+(drafts.get(type)||'')+'</div></section>').join('');
+   bindArticleEditors(sections);
+ }
+ panel.onchange=e=>{
+   const checkbox=e.target.closest('input[type="checkbox"]');if(!checkbox)return;
+   readDrafts();
+   if(checkbox.checked)selectedTypes.add(checkbox.value);else selectedTypes.delete(checkbox.value);
+   if(!selectedTypes.size){selectedTypes.add(checkbox.value);checkbox.checked=true;toast('Выберите хотя бы один тип');return;}
+   if(!selectedTypes.has(primary)){
+     primary=[...selectedTypes][0];$('itemType').value=primary;
+     $('editorText').innerHTML=drafts.get(primary)||'';
+   }
+   dirty=true;renderSections();
+ };
+ $('itemType').onchange=()=>{
+   readDrafts();primary=$('itemType').value;selectedTypes.add(primary);
+   for(const checkbox of panel.querySelectorAll('input'))checkbox.checked=selectedTypes.has(checkbox.value);
+   $('editorText').innerHTML=drafts.get(primary)||'';dirty=true;renderSections();
+ };
+ form.readConfigurations=()=>{
+   readDrafts();
+   const types=[primary,...[...selectedTypes].filter(type=>type!==primary)];
+   return {types,sections:types.filter(type=>type!==primary).map(type=>({type,article:cleanHTML(drafts.get(type)||'')}))};
+ };
+ renderSections();
+}
+function setupCitySearch(panel,{label,excluded,select}){
+ panel.replaceChildren();
+ const field=document.createElement('label');field.className='link-picker';field.textContent=label;
+ const input=document.createElement('input');input.type='search';input.placeholder='Название города';input.autocomplete='off';input.setAttribute('aria-label',label);
+ const results=document.createElement('div');results.className='city-search-results';results.hidden=true;
+ field.append(input);panel.append(field,results);
+ function render(){
+   const query=input.value.trim().toLocaleLowerCase('ru');results.replaceChildren();results.hidden=!query;
+   if(!query)return;
+   const cities=items.filter(city=>isCity(city)&&!excluded().includes(city.id)&&(city.title+' '+city.place).toLocaleLowerCase('ru').includes(query)).sort((a,b)=>a.title.localeCompare(b.title,'ru')).slice(0,15);
+   for(const city of cities){
+     const button=document.createElement('button');button.type='button';button.textContent=city.title+(city.place?' · '+city.place:'');
+     button.onclick=()=>{select(city.id);input.value='';render();};results.append(button);
+   }
+   if(!cities.length)results.textContent='Нет результатов';
+ }
+ input.oninput=render;
+ input.onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();results.querySelector('button')?.click();}};
+ return render;
+}
+function setupPeerSearch(item){
+ const panel=$('peerControls'),form=$('editorForm');
+ setupCitySearch(panel,{label:'Связать с другим городом',excluded:()=>[item.id,...form.readRelations().peers],select:id=>form.togglePeer(id)});
+}
+function diagramNode(item,x,y,radius,opacity=1){
+ const types=configurationTypes(item);
+ const pieces=types.length===1?'<circle cx="'+x+'" cy="'+y+'" r="'+radius+'" fill="'+TYPES[types[0]].tone+'"/>':types.map((type,index)=>{
+   const a=(index/types.length*2-.5)*Math.PI,b=((index+1)/types.length*2-.5)*Math.PI;
+   const first=[Number(x)+radius*Math.cos(a),Number(y)+radius*Math.sin(a)];
+   const last=[Number(x)+radius*Math.cos(b),Number(y)+radius*Math.sin(b)];
+   return '<path d="M'+x+' '+y+'L'+first.join(' ')+'A'+radius+' '+radius+' 0 0 1 '+last.join(' ')+'Z" fill="'+TYPES[type].tone+'"/>';
+ }).join('');
+ return '<g opacity="'+opacity+'">'+pieces+'<circle cx="'+x+'" cy="'+y+'" r="'+radius+'" fill="none" stroke="#fff" stroke-width="1.2"><title>'+esc(item.title)+'</title></circle></g>';
+}
+function openWaterPaths(paths){
+ return paths.map(path=>{
+   const first=path[0],last=path.at(-1);
+   return first[0]===last[0]&&first[1]===last[1]?path.slice(0,-1):path;
+ });
+}
+function waterArea(geometry){
+ if(geometry?.type==='LineString')return readGeometry({type:'Polygon',coordinates:[geometry.coordinates]});
+ if(geometry?.type==='MultiLineString')return readGeometry({type:'MultiPolygon',coordinates:geometry.coordinates.map(line=>[line])});
+ return geometry;
+}
+function validCustomScheme(value){
+ return typeof value==='string'&&value.length<=1250000&&/^data:image\/(?:png|jpeg|webp|svg\+xml);base64,[a-zA-Z0-9+/=]+$/.test(value)?value:'';
+}
+function customDiagram(item){
+ const image=validCustomScheme(item.customScheme);
+ return image?'<figure class="scheme custom-scheme"><img src="'+image+'" alt="Схема · '+esc(item.title)+'"></figure>':'';
+}
+function displayDiagram(item){
+ return customDiagram(item)||((item.schemeZoom&&item.schemeZoom!==1||item.peers?.length||item.excluded?.length||item.natural?.length||item.related?.length)?relatedDiagram(item):(scheme(item)||relatedDiagram(item)));
+}
+function setupSchemeEditor(item){
+ const form=$('editorForm'),panel=$('schemeControls');
+ let image=validCustomScheme(item.customScheme);
+ panel.innerHTML='<label class="scheme-scale">Масштаб схемы<input id="schemeZoom" type="range" min="35" max="300" step="5" value="'+Math.round((item.schemeZoom||1)*100)+'" aria-label="Масштаб схемы"><output id="schemeZoomValue"></output></label><div id="schemePreview"></div><div class="scheme-upload"><button type="button" id="uploadScheme">Загрузить свою схему</button><input id="schemeFile" type="file" accept="image/png,image/jpeg,image/webp,image/svg+xml,.svg" hidden><button type="button" id="resetScheme">Автоматическая схема</button></div>';
+ const slider=$('schemeZoom');
+ form.readSchemeZoom=()=>Number(slider.value)/100;
+ form.readCustomScheme=()=>image;
+ form.renderSchemePreview=()=>{
+   $('schemeZoomValue').textContent=slider.value+'%';
+   slider.disabled=Boolean(image);$('resetScheme').hidden=!image;
+   const state=form.readRelations?.()||item;
+   const draft={...item,...state,schemeZoom:form.readSchemeZoom(),customScheme:image};
+   $('schemePreview').innerHTML=displayDiagram(draft);
+ };
+ slider.oninput=()=>{dirty=true;form.renderSchemePreview();};
+ $('uploadScheme').onclick=()=>$('schemeFile').click();
+ $('resetScheme').onclick=()=>{image='';dirty=true;form.renderSchemePreview();};
+ $('schemeFile').onchange=async event=>{
+   const file=event.target.files[0];if(!file)return;
+   const mime=file.type||(/\.svg$/i.test(file.name)?'image/svg+xml':'');
+   if(!['image/png','image/jpeg','image/webp','image/svg+xml'].includes(mime)||file.size>900000){toast('Выберите PNG, JPEG, WebP или SVG до 900 КБ');event.target.value='';return;}
+   try{
+     const data=await new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(reader.result);reader.onerror=reject;reader.readAsDataURL(file);});
+     const normalized=String(data).replace(/^data:[^;]*;/,'data:'+mime+';');
+     if(!validCustomScheme(normalized))throw Error('invalid');
+     image=normalized;dirty=true;form.renderSchemePreview();
+   }catch{toast('Не удалось загрузить схему');}
+   event.target.value='';
+ };
+ form.renderSchemePreview();
 }
 
 ;
@@ -1545,13 +1764,16 @@ function normalize(arr){
  if(!Array.isArray(arr)||arr.length>400)throw new Error('Неверный список знаков');
  const ids=new Set();
  return arr.map(raw=>{
-   if(!raw||!Object.hasOwn(TYPES,raw.type)||typeof raw.lat!=='number'||typeof raw.lon!=='number'||!Number.isFinite(raw.lat)||!Number.isFinite(raw.lon))throw new Error('Неверный знак');
+   if(!raw||!Object.hasOwn(TYPES,canonicalType(raw.type))||typeof raw.lat!=='number'||typeof raw.lon!=='number'||!Number.isFinite(raw.lat)||!Number.isFinite(raw.lon))throw new Error('Неверный знак');
    const id=String(raw.id||'');if(!/^[\w-]{1,60}$/.test(id)||ids.has(id))throw new Error('Неверный идентификатор');ids.add(id);
+   const type=canonicalType(raw.type);
    const original=STARTERS.find(e=>e.id===id);
-   const geometry=raw.geometry?readGeometry(raw.geometry):null;
+   const types=configurationTypes({...raw,type}).filter(key=>raw.geometry&&raw.geometry.type!=='Point'?key===type:key===type||CITY_TYPES.includes(key));
+   const sections=types.filter(key=>key!==type).map(key=>({type:key,article:cleanHTML(raw.sections?.find(section=>section?.type===key)?.article||'')}));
+   const geometry=raw.geometry?(type==='lake'?waterArea(readGeometry(raw.geometry)):readGeometry(raw.geometry)):null;
    const links=Array.isArray(raw.links)?[...new Set(raw.links.filter(id=>typeof id==='string'&&/^[\w-]{1,60}$/.test(id)))].slice(0,400):[];
    const natural=Array.isArray(raw.natural)?[...new Set(raw.natural.filter(id=>NATURAL_BY_ID.has(id)))].slice(0,100):[];
-   return {id,type:raw.type,natural,excluded:drawingIds(raw.excluded),related:drawingIds(raw.related),peers:drawingIds(raw.peers).filter(peer=>peer!==id),...(geometry?{geometry,links}:{}),title:String(raw.title||TYPES[raw.type].name).trim().slice(0,100)||TYPES[raw.type].name,place:String(raw.place||'').trim().slice(0,100),lat:clamp(raw.lat,-MAX_LAT,MAX_LAT),lon:wrap(raw.lon),angle:clamp(Number(raw.angle)||0,-180,180),size:clamp(Number(raw.size)||1,.7,1.5),article:cleanHTML(raw.article),...(original?{example:original.example,source:original.source,lesson:original.lesson,number:original.number,pages:original.pages}:{})};
+   return {id,type,customScheme:validCustomScheme(raw.customScheme),schemeZoom:clamp(Number(raw.schemeZoom)||1,.35,3),...(!raw.geometry||raw.geometry.type==='Point'?{types,sections}:{}),natural,excluded:drawingIds(raw.excluded),related:drawingIds(raw.related),peers:drawingIds(raw.peers).filter(peer=>peer!==id),...(geometry?{geometry,links}:{}),title:String(raw.title||TYPES[type].name).trim().slice(0,100)||TYPES[type].name,place:String(raw.place||'').trim().slice(0,100),lat:clamp(raw.lat,-MAX_LAT,MAX_LAT),lon:wrap(raw.lon),angle:clamp(Number(raw.angle)||0,-180,180),size:clamp(Number(raw.size)||1,.7,1.5),article:cleanHTML(raw.article),...(original?{example:original.example,source:original.source,lesson:original.lesson,number:original.number,pages:original.pages}:{})};
  });
 }
 const BASE_V2=BASE+'-lectures';
@@ -1592,7 +1814,7 @@ function inCollection(item){
  return regions[collectionFilter]?.has(item.id.slice(4))||false;
 }
 const ofLayer=(item,which)=>which==='all'||(which==='lecture'?Boolean(item.lesson):!item.lesson);
-const visibleItems=()=>items.filter(item=>inCollection(item)&&ofLayer(item,layer)&&(typeFilter==='any'||item.type===typeFilter));
+const visibleItems=()=>items.filter(item=>inCollection(item)&&ofLayer(item,layer)&&(typeFilter==='any'||configurationTypes(item).includes(typeFilter)));
 let selected=null,activeTool=null,moving=false,dirty=false,editPoint=null;
 const map=$('map'), markers=$('markers'), labels=$('labels'), basemap=$('basemap'), detail=$('detail');
 const vis={lon:20,y:py(37),zoom:1,width:1,height:1,base:1};
@@ -1717,7 +1939,7 @@ function renderFilter(){
    button.dataset.count=items.filter(item=>ofLayer(item,group)).length;
  }
  $('typeFilter').hidden=layer==='work';
- const filter=$('typeSelect'), relevant=new Set(items.filter(item=>inCollection(item)&&ofLayer(item,layer)).map(item=>item.type));
+ const filter=$('typeSelect'), relevant=new Set(items.filter(item=>inCollection(item)&&ofLayer(item,layer)).flatMap(configurationTypes));
  filter.innerHTML='<option value="any">Все типы</option>'+Object.entries(TYPES).filter(([type])=>relevant.has(type)).map(([type,t])=>'<option value="'+type+'">'+t.name+'</option>').join('');
  if(typeFilter!=='any'&&!relevant.has(typeFilter))filter.add(new Option(TYPES[typeFilter].name,typeFilter));
  refreshCollectionHighlight();
@@ -1730,8 +1952,8 @@ function renderItems(){
    const el=document.createElement('button');
    el.className='marker'+(item.id===selected?' selected':'');
    el.setAttribute('aria-pressed',String(item.id===selected));
-   el.setAttribute('aria-label',item.title+' — '+TYPES[item.type].name);
-   el.setAttribute('style','--tone:'+TYPES[item.type].tone);
+   el.setAttribute('aria-label',item.title+' — '+configurationTypes(item).map(type=>TYPES[type].name).join(', '));
+   el.setAttribute('style','--tone:'+TYPES[item.type].tone+';--marker-fill:'+markerColor(item));
    el.innerHTML='<span class="disc" aria-hidden="true"></span><span class="marker-caption" aria-hidden="true">'+esc(item.title)+'</span>';
    el.onclick=()=>{if(naturalPicking){$('editorForm')?.togglePeer?.(item.id);return;}if(mode==='edit'&&(activeTool||moving||drawing))handleMapPosition(item.lon,item.lat);else selectItem(item.id);};
    return {el,item};
@@ -1748,7 +1970,7 @@ function renderCollection(){
    if(query&&!(item.title+' '+item.place).toLocaleLowerCase('ru').includes(query))continue;
    const el=document.createElement('button');
    el.className='index-button'+(item.id===selected?' active':'');
-   el.innerHTML='<span class="finder-dot" '+tone(item.type)+'></span><span>'+esc(item.title)+'</span>'+(item.place?'<small>'+esc(item.place)+'</small>':'');
+   el.innerHTML='<span class="finder-dot" style="background:'+markerColor(item)+'"></span><span>'+esc(item.title)+'</span>'+(item.place?'<small>'+esc(item.place)+'</small>':'');
    el.onclick=()=>{if(naturalPicking){$('editorForm')?.togglePeer?.(item.id);return;}selectItem(item.id);center(item);togglePop($('finderButton'),$('finder'),false);};
    collection.append(el);
  }
@@ -1786,32 +2008,43 @@ function renderDetail(){
  if(mode==='edit'){renderEditor(item);return;}
  const type=TYPES[item.type];
  const refs=[...(item.source||[]),...(MARINE_SOURCES[item.id]?[MARINE_SOURCES[item.id]]:[])].map(([name,url])=>'<a href="'+esc(url)+'" target="_blank" rel="noopener noreferrer">'+esc(name)+'</a>').join(' · ');
- detail.innerHTML='<article class="detail-inner"><div class="detail-top"><div class="detail-type" '+tone(item.type)+'><span class="detail-symbol">'+glyph(item.type)+'</span>'+type.name+'</div><button id="closeItem" class="detail-close" aria-label="Закрыть карточку" title="Закрыть карточку">'+icon('close')+'</button></div><h2>'+esc(item.title)+'</h2><div class="subline">'+icon('pin')+(item.place?esc(item.place)+'<span class="divider">·</span>':'')+'<span class="coordinates">'+coord(item)+'</span></div>'+(item.lesson?'<div class="lecture-reference"><span>Лекция '+item.lesson+' · пример '+esc(item.number)+'</span><small>Печатное издание 2006 г., с. '+esc(item.pages)+'</small></div>':'')+((item.peers?.length||item.excluded?.length||item.natural?.length||item.related?.length)?relatedDiagram(item):(scheme(item)||relatedDiagram(item)))+'<div class="article-body">'+item.article+'</div>'+(refs?'<p class="article-source">Для справки: '+refs+'</p>':'')+'</article>';
+ detail.innerHTML='<article class="detail-inner"><div class="detail-top"><div class="detail-type" '+tone(item.type)+'><span class="detail-symbol">'+glyph(item.type)+'</span>'+type.name+'</div><button id="closeItem" class="detail-close" aria-label="Закрыть" title="Закрыть">'+icon('close')+'</button></div><h2>'+esc(item.title)+'</h2><div class="subline">'+icon('pin')+(item.place?esc(item.place)+'<span class="divider">·</span>':'')+'<span class="coordinates">'+coord(item)+'</span></div>'+(item.lesson?'<div class="lecture-reference"><span>Лекция '+item.lesson+' · пример '+esc(item.number)+'</span><small>Печатное издание 2006 г., с. '+esc(item.pages)+'</small></div>':'')+displayDiagram(item)+articleSections(item)+(refs?'<p class="article-source">Для справки: '+refs+'</p>':'')+'</article>';
  $('closeItem').onclick=closeDetail;
 }
 function toolButton(label,title,content,command){return '<button type="button" aria-label="'+title+'" title="'+title+'" data-command="'+command+'">'+(content||label)+'</button>';}
+
+function editorToolbar(){return '<div class="toolbar" aria-label="Форматирование статьи">'+toolButton('¶','Абзац','','paragraph')+toolButton('H','Подзаголовок','','heading')+toolButton('','Жирный','<b>Ж</b>','bold')+toolButton('','Курсив','<i>К</i>','italic')+toolButton('','Маркированный список',icon('list'),'insertUnorderedList')+toolButton('','Ссылка',icon('link'),'link')+toolButton('','Изображение',icon('image'),'image')+'</div>';}
+function currentArticleEditor(range){
+ const node=range?.commonAncestorContainer;
+ return (node?.nodeType===1?node:node?.parentElement)?.closest('.editable')||document.activeElement?.closest('.editable')||$('editorText');
+}
+function bindArticleEditors(container){
+ for(const editor of container.querySelectorAll('.editable')){
+   if(editor.dataset.bound)continue;editor.dataset.bound='true';
+   editor.addEventListener('paste',event=>{event.preventDefault();const text=event.clipboardData?.getData('text/plain')||'';if(text)document.execCommand('insertText',false,text);});
+   editor.addEventListener('drop',event=>event.preventDefault());
+ }
+ for(const button of container.querySelectorAll('.toolbar button')){
+   if(button.dataset.bound)continue;button.dataset.bound='true';
+   button.addEventListener('pointerdown',event=>event.preventDefault());button.onclick=()=>format(button.dataset.command);
+ }
+}
+
 function renderEditor(item){
  const shape=Boolean(item.geometry&&item.geometry.type!=='Point');
+ const editorLabel=shape?TYPES[item.type].name:'Город';
+ detail.setAttribute('aria-label',editorLabel);
  const legacy=!item.geometry&&LINE_TYPES.has(item.type);
- const options=Object.entries(TYPES).filter(([key])=>shape||!LINE_TYPES.has(key)||key===item.type).map(([k,t])=>'<option value="'+k+'"'+(k===item.type?' selected':'')+'>'+t.name+'</option>').join('');
- detail.innerHTML='<div class="detail-inner"><div class="editor-top"><div><h2>Карточка</h2></div><button id="closeItem" class="detail-close" aria-label="Закрыть карточку" title="Закрыть карточку">'+icon('close')+'</button></div><form id="editorForm"><div class="editor-fields"><label>Название<input id="itemTitle" value="'+esc(item.title)+'" maxlength="100" required></label><label>Место или страна<input id="itemPlace" value="'+esc(item.place)+'" maxlength="100" placeholder="Например, Германия"></label><label>Условный знак<select id="itemType">'+options+'</select></label><div class="editor-location"><span class="coordinates" id="editCoord">'+coord(item)+'</span><button type="button" id="moveItem">'+icon('pin')+(shape?' Перерисовать':legacy?' Нарисовать':' Перенести')+'</button></div></div>'+(shape?'<div id="linkControls"></div>':'<div id="naturalControls"></div><div id="cityCollections"></div>')+'<div class="toolbar" aria-label="Форматирование статьи">'+toolButton('¶','Абзац','','paragraph')+toolButton('H','Подзаголовок','','heading')+toolButton('','Жирный','<b>Ж</b>','bold')+toolButton('','Курсив','<i>К</i>','italic')+toolButton('','Маркированный список',icon('list'),'insertUnorderedList')+toolButton('','Ссылка',icon('link'),'link')+toolButton('','Изображение',icon('image'),'image')+'</div><div id="editorText" role="textbox" aria-label="Текст статьи" aria-multiline="true" class="article-body editable" contenteditable="true" data-placeholder="Опишите, как конфигурация повлияла на появление города…">'+item.article+'</div><div class="detail-actions editor-actions"><button type="submit" class="primary">'+icon('check')+' Сохранить</button><button type="button" id="deleteItem" class="delete">'+icon('trash')+' Удалить</button></div><div id="deleteConfirm" class="delete-confirm" hidden>Удалить знак и его статью?<br><button type="button" id="deleteYes">Удалить</button><button type="button" id="deleteNo">Отмена</button></div></form></div>';
+ const options=Object.entries(TYPES).filter(([key])=>shape||CITY_TYPES.includes(key)||key===item.type).map(([k,t])=>'<option value="'+k+'"'+(k===item.type?' selected':'')+'>'+t.name+'</option>').join('');
+ detail.innerHTML='<div class="detail-inner"><div class="editor-top"><div><h2>'+esc(editorLabel)+'</h2></div><button id="closeItem" class="detail-close" aria-label="Закрыть" title="Закрыть">'+icon('close')+'</button></div><form id="editorForm"><div class="editor-fields"><label>Название<input id="itemTitle" value="'+esc(item.title)+'" maxlength="100" required></label><label>Место или страна<input id="itemPlace" value="'+esc(item.place)+'" maxlength="100" placeholder="Например, Германия"></label><label>Условный знак<select id="itemType" aria-label="Условный знак">'+options+'</select></label><div class="editor-location"><span class="coordinates" id="editCoord">'+coord(item)+'</span><button type="button" id="moveItem">'+icon('pin')+(shape?' Перерисовать':legacy?' Нарисовать':' Перенести')+'</button></div></div>'+(shape?'<div id="linkControls"></div>':'<div id="configurationControls"></div><div id="naturalControls"></div><div id="peerControls"></div><div id="cityCollections"></div>')+'<div id="schemeControls"></div>'+editorToolbar()+'<div id="editorText" role="textbox" aria-label="Текст статьи" aria-multiline="true" class="article-body editable" contenteditable="true" data-placeholder="Опишите, как конфигурация повлияла на появление города…">'+item.article+'</div><div id="additionalArticles"></div><div class="detail-actions editor-actions"><button type="submit" class="primary">'+icon('check')+' Сохранить</button><button type="button" id="deleteItem" class="delete">'+icon('trash')+' Удалить</button></div><div id="deleteConfirm" class="delete-confirm" hidden>Удалить знак и его статью?<br><button type="button" id="deleteYes">Удалить</button><button type="button" id="deleteNo">Отмена</button></div></form></div>';
  $('closeItem').onclick=closeDetail;
  let links=[...(item.links||[])];
  if(shape){
    const container=$('linkControls');
    function renderLinks(){
      container.replaceChildren();
-     const label=document.createElement('label');
-     label.className='link-picker';
-     label.textContent='Связать с городом';
-     const select=document.createElement('select');
-     select.setAttribute('aria-label','Связать с городом');
-     select.add(new Option('Выбрать город',''));
-     const cities=items.filter(candidate=>candidate.id!==item.id&&!links.includes(candidate.id)&&(!candidate.geometry||candidate.geometry.type==='Point')&&!LINE_TYPES.has(candidate.type));
-     cities.sort((a,b)=>a.title.localeCompare(b.title,'ru'));
-     for(const city of cities)select.add(new Option(city.title+(city.place?' · '+city.place:''),city.id));
-     select.onchange=()=>{if(select.value){links.push(select.value);dirty=true;renderLinks();}};
-     label.append(select);container.append(label);
+     const search=document.createElement('div');container.append(search);
+     setupCitySearch(search,{label:'Связать с городом',excluded:()=>[item.id,...links],select:id=>{links.push(id);dirty=true;renderLinks();}});
      const linked=document.createElement('div');
      linked.className='linked-cities';
      for(const id of links){
@@ -1824,15 +2057,16 @@ function renderEditor(item){
      }
      container.append(linked);
      $('editorForm').readLinks=()=>links;
+     $('editorForm').renderSchemePreview?.();
    }
    renderLinks();
- }else{setupNaturalPicker(item);setupCityCollections(item,$('editorForm'));}
+ }else{setupNaturalPicker(item);setupPeerSearch(item);setupCityCollections(item,$('editorForm'));}
  $('editorForm').addEventListener('input',()=>{dirty=true;});
  $('editorForm').onsubmit=e=>{e.preventDefault();if(commit(true))closeDetail();};
  $('moveItem').onclick=()=>{
    if(shape||legacy){
      if(dirty)commit();
-     const area=legacy?item.type==='massif':['Polygon','MultiPolygon'].includes(item.geometry.type);
+     const area=legacy?['massif','lake'].includes(item.type):['Polygon','MultiPolygon'].includes(item.geometry.type);
      startDrawing(item.type,area,item.id);
      return;
    }
@@ -1841,25 +2075,22 @@ function renderEditor(item){
  $('deleteItem').onclick=()=>{$('deleteConfirm').hidden=false;};
  $('deleteNo').onclick=()=>{$('deleteConfirm').hidden=true;};
  $('deleteYes').onclick=()=>{items=items.filter(n=>n.id!==item.id);for(const candidate of items){if(candidate.links)candidate.links=candidate.links.filter(id=>id!==item.id);if(candidate.peers)candidate.peers=candidate.peers.filter(id=>id!==item.id);}for(const set of userCollections)set.cities=set.cities.filter(id=>id!==item.id);selected=null;dirty=false;moving=false;editPoint=null;saveMessage(persist(),'Знак удалён');render();};
- const ed=$('editorText');
- ed.addEventListener('paste',event=>{
-   event.preventDefault();
-   const txt=event.clipboardData?.getData('text/plain')||'';
-   if(txt)document.execCommand('insertText',false,txt);
- });
- ed.addEventListener('drop',event=>event.preventDefault());
- for(const btn of detail.querySelectorAll('.toolbar button')){
-   btn.addEventListener('pointerdown',e=>e.preventDefault());
-   btn.onclick=()=>format(btn.dataset.command);
- }
+ bindArticleEditors(detail);
+ if(!shape)setupConfigurationEditor(item);
+ else $('itemType').onchange=()=>{const label=TYPES[$('itemType').value].name;detail.querySelector('.editor-top h2').textContent=label;detail.setAttribute('aria-label',label);};
+ setupSchemeEditor(item);
+
 }
 function commit(notify=false){
  const item=chosen(), input=$('itemTitle');
  if(!item||!input)return false;
- const replacement={...item,...(editPoint||{}),type:$('itemType').value,title:input.value.trim()||TYPES[$('itemType').value].name,...($('editorForm').readRelations?.()||{}),place:$('itemPlace').value.trim(),...(item.geometry?{geometry:item.geometry.type==='Point'&&editPoint?{type:'Point',coordinates:[editPoint.lon,editPoint.lat]}:item.geometry,links:$('editorForm').readLinks?.()||item.links||[]}:{}),article:cleanHTML($('editorText').innerHTML)};
+ const replacement={...item,...(editPoint||{}),type:$('itemType').value,...($('editorForm').readConfigurations?.()||{}),schemeZoom:$('editorForm').readSchemeZoom?.()||item.schemeZoom||1,customScheme:$('editorForm').readCustomScheme?.()||'',title:input.value.trim()||TYPES[$('itemType').value].name,...($('editorForm').readRelations?.()||{}),place:$('itemPlace').value.trim(),...(item.geometry?{geometry:item.geometry.type==='Point'&&editPoint?{type:'Point',coordinates:[editPoint.lon,editPoint.lat]}:item.geometry,links:$('editorForm').readLinks?.()||item.links||[]}:{}),article:cleanHTML($('editorText').innerHTML)};
+ if(replacement.type==='lake'&&replacement.geometry){
+   try{replacement.geometry=waterArea(replacement.geometry);}catch{toast('Для водного объекта нужны хотя бы три вершины');return false;}
+ }
  Object.assign(item,replacement);$('editorForm').saveCollections?.();input.value=item.title;
  const saved=persist();dirty=false;moving=false;editPoint=null;
- if(notify||!saved)saveMessage(saved,'Карточка сохранена');
+ if(notify||!saved)saveMessage(saved,(isCity(item)?'Город':TYPES[item.type].name)+' сохранён');
  return true;
 }
 function updatePalette(){
@@ -1919,7 +2150,7 @@ function startDrawing(type,area,replacing=null,tool=type){
  if(dirty)commit();
  const item=chosen();
  const city=!replacing&&item&&(!item.geometry||item.geometry.type==='Point')&&!LINE_TYPES.has(item.type)?item.id:null;
- drawing={type,area,replacing,city,tool,points:[],cursor:null};
+ drawing={type,area:type==='lake'||area,replacing,city,tool,points:[],cursor:null};
  activeTool=null;moving=false;detail.hidden=true;updatePalette();refresh();
 }
 function finishDrawing(){
@@ -1945,12 +2176,12 @@ function cancelDrawing(){
 $('finishDrawing').onclick=finishDrawing;
 $('cancelDrawing').onclick=cancelDrawing;
 function cursorRange(){
- const ed=$('editorText');if(!ed)return null;
+ const ed=currentArticleEditor();if(!ed)return null;
  const sel=getSelection();
  if(sel.rangeCount&&ed.contains(sel.getRangeAt(0).commonAncestorContainer))return sel.getRangeAt(0).cloneRange();
  const r=document.createRange();r.selectNodeContents(ed);r.collapse(false);return r;
 }
-function restoreRange(range){const ed=$('editorText');if(!ed||!range)return;ed.focus();const sel=getSelection();sel.removeAllRanges();sel.addRange(range);}
+function restoreRange(range){const ed=currentArticleEditor(range);if(!ed||!range)return;ed.focus();const sel=getSelection();sel.removeAllRanges();sel.addRange(range);}
 function format(cmd){
  const range=cursorRange();if(!range)return;
  if(cmd==='link'||cmd==='image'){
@@ -2093,7 +2324,7 @@ $('modeButton').onclick=()=>setMode(mode==='edit'?'view':'edit');
 const drawingTools=[
  {key:'core',type:'core',label:'Город',geometry:'point'},
  {key:'river',type:'river',label:'Река',geometry:'line'},
- {key:'lake',type:'lake',label:'Озеро',geometry:'area'},
+ {key:'lake',type:'lake',label:'Водный объект',geometry:'area'},
  {key:'barrier',type:'barrier',label:'Барьер',geometry:'line'},
  {key:'channel',type:'channel',label:'Канал',geometry:'line'},
  {key:'massif',type:'massif',label:'Массив',geometry:'area'},
@@ -2118,6 +2349,7 @@ $('drawConfig').onclick=()=>{
  const opening=$('configType').hidden;
  for(const id of ['configType','configShape','beginConfig'])$(id).hidden=!opening;
 };
+$('configType').onchange=()=>{const water=$('configType').value==='lake';$('configShape').disabled=water;if(water)$('configShape').value='area';};
 $('beginConfig').onclick=()=>startDrawing($('configType').value,$('configShape').value==='area',null,'config');
 $('spatial').addEventListener('click',e=>{
  const feature=e.target.closest('[data-feature]');
