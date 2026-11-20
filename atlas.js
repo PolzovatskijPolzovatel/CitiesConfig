@@ -328,9 +328,10 @@ let showWater=true,showMountains=true;
 
 const naturalBins=new Map();
 const visibleNaturalBins=new Map();
+let naturalOverrideSignature='';
 let bathyBuilt=false;
 let bathyLoading=null;
-let showHistoric=false,showBathymetry=true;
+let showHistoric=false,showBathymetry=false;
 
 function coordinatesBounds(points){
  const bounds=[180,90,-180,-90];
@@ -401,6 +402,12 @@ function buildBathymetry(data){
 function bathyVisibleMask(kind){return kind==='river'&&!showWater&&naturalPicking;}
 
 function drawNaturalLayer(viewBox,k){
+ const hiddenObjects=naturalOverrideIds();
+ const signature=[...hiddenObjects].sort().join(',');
+ if(signature!==naturalOverrideSignature){
+   for(const {path} of visibleNaturalBins.values())path.remove();
+   visibleNaturalBins.clear();for(const bin of naturalBins.values())bin.path=null;naturalOverrideSignature=signature;
+ }
  const svg=$('natural');
  svg.setAttribute('viewBox',viewBox);
  $('naturalHit').setAttribute('viewBox',viewBox);
@@ -431,7 +438,7 @@ function drawNaturalLayer(viewBox,k){
        visibleNaturalBins.get(position).path.classList.toggle('river-pick-only',masked);
        continue;
      }
-     if(!bin.path)bin.path=bin.features.map(feature=>projectedPath(feature.geometry)).join(' ');
+     if(!bin.path)bin.path=bin.features.filter(feature=>!hiddenObjects.has(feature.id)).map(feature=>projectedPath(feature.geometry)).join(' ');
      const path=svgNode('path',{d:bin.path,class:'nature-'+bin.kind,'vector-effect':'non-scaling-stroke','fill-rule':'nonzero',transform:'translate('+offset+' 0)'});
      visibleNaturalBins.set(position,{path,bin,offset});
      path.classList.toggle('river-pick-only',masked);
@@ -507,6 +514,7 @@ function setupNaturalPicker(item){
      const button=document.createElement('button');
      button.type='button';button.textContent=title+' ×';button.title='Убрать связь';
      button.onclick=toggle;chips.append(button);
+     if(object){const edit=document.createElement('button');edit.type='button';edit.textContent='Изменить';edit.setAttribute('aria-label','Изменить · '+title);edit.onclick=()=>selectItem(object.id);chips.append(edit);}
      const full=object&&fullRiverFor(object);
      if(full&&full.id!==object.id){
        const expand=document.createElement('button');expand.type='button';expand.textContent='Целиком';expand.setAttribute('aria-label','Показать целиком · '+title);
@@ -634,11 +642,12 @@ function findNaturalHit(px,py,tolerancePixels=8,preferRiver=false){
  const y=vis.y+(py-vis.height/2)/scale;
  const tolerance=tolerancePixels/scale;
  let best=null;
+ const hiddenObjects=naturalOverrideIds();
  for(const {bin,offset} of visibleNaturalBins.values()){
    const x=lon-offset;
    if(x<bin.west-tolerance||x>bin.east+tolerance||y<bin.top-tolerance||y>bin.bottom+tolerance)continue;
    for(const feature of bin.features){
-     if(!feature.title||preferRiver&&feature.kind!=='river')continue;
+     if(hiddenObjects.has(feature.id)||!feature.title||preferRiver&&feature.kind!=='river')continue;
      const bounds=feature.bounds;
      if(bounds&&(x<bounds[0]-tolerance||x>bounds[2]+tolerance))continue;
      const candidate=packedHitGeometry(feature);
@@ -1122,8 +1131,8 @@ function renderSpatial(){
  const matching=new Set(visibleItems().map(item=>item.id));
  const related=current?relatedShapes(current):[];
  const selectedShapes=new Set(related.map(shape=>shape.id));
- const display=new Map([...BUILTIN_FEATURES.filter(shape=>shape.links.some(id=>matching.has(id))),
-   ...items.filter(item=>item.geometry&&item.geometry.type!=='Point'&&(matching.has(item.id)||item.links?.some(id=>matching.has(id)))),
+ const display=new Map([...effectiveBuiltins().filter(shape=>shape.links.some(id=>matching.has(id))),
+   ...items.filter(item=>!item.deleted&&item.geometry&&item.geometry.type!=='Point'&&(matching.has(item.id)||item.links?.some(id=>matching.has(id)))),
    ...related].map(shape=>[shape.id,shape]));
  const shapes=[...display.values()];
  if(drawing?.points.length){
@@ -1145,7 +1154,7 @@ function renderSpatial(){
      if(part.point){
        const [cx,cy]=point(...part.point);
        group.append(svgNode('circle',{cx,cy,r:active?4:2.5,fill:type.tone,stroke:'#fff','stroke-width':1}));
-       if(isCustom&&!drawing&&!moving)group.append(svgNode('circle',{cx,cy,r:9,fill:'transparent',class:'feature-hit inside','data-feature':shape.id}));
+       if((isCustom||mode==='edit')&&!drawing&&!moving)group.append(svgNode('circle',{cx,cy,r:9,fill:'transparent',class:'feature-hit inside','data-feature':shape.id}));
        continue;
      }
      const d=part.paths.map(path=>pathFor(path,part.area)).join(' ');
@@ -1155,7 +1164,7 @@ function renderSpatial(){
        const open=openWaterPaths(part.paths).map(ring=>pathFor(ring,false)).join(' ');
        group.append(svgNode('path',{d:open,class:'line'}));
      }else group.append(path);
-     if(isCustom&&!drawing&&!moving){
+     if((isCustom||mode==='edit')&&!drawing&&!moving){
        const hit=svgNode('path',{d,class:part.area?'feature-hit inside':'feature-hit','fill-rule':'evenodd','data-feature':shape.id,'aria-hidden':'true'});
        group.append(hit);
      }
@@ -1211,10 +1220,10 @@ function relatedDiagram(item){
  for(const peer of peers){
    const [x,y]=project([peer.lon,peer.lat]);minX=Math.min(minX,x);maxX=Math.max(maxX,x);minY=Math.min(minY,y);maxY=Math.max(maxY,y);
  }
- const scale=Math.min(276/Math.max(.001,maxX-minX),96/Math.max(.001,maxY-minY))*clamp(Number(item.schemeZoom)||1,.35,3);
+ const scale=Math.min(276/Math.max(.001,maxX-minX),96/Math.max(.001,maxY-minY))*positiveSchemeZoom(item.schemeZoom);
  const position=coord=>{
    const [x,y]=project(coord);
-   return [(155+(x-(minX+maxX)/2)*scale).toFixed(2),(61+(y-(minY+maxY)/2)*scale).toFixed(2)];
+   return [(155+(x-(minX+maxX)/2)*scale+finiteSchemeNumber(item.schemePanX)).toFixed(2),(61+(y-(minY+maxY)/2)*scale+finiteSchemeNumber(item.schemePanY)).toFixed(2)];
  };
  const paths=traces.map(({feature,paths,area})=>{
    const d=paths.map(path=>path.map((coord,i)=>(i?'L':'M')+position(coord).join(' ')).join(' ')+(area?'Z':'')).join(' ');
@@ -1227,7 +1236,7 @@ function relatedDiagram(item){
    return '<path d="'+d+'" stroke="'+color+'" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" fill="'+(area?color:'none')+'" fill-opacity=".2" fill-rule="evenodd"'+dash+(['vector','current'].includes(feature.type)&&!area?' marker-end="url(#scheme-arrow)"':'')+'><title>'+esc(feature.title)+'</title></path>';
  }).join('');
  const [x,y]=position([item.lon,item.lat]);
- const node=isCity(item)?diagramNode(item,x,y,4.4):'';
+ const node=isCity(item)?'<g data-city-anchor>'+diagramNode(item,x,y,4.4)+'</g>':'';
  const otherCities=peers.map(peer=>{
    const [x,y]=position([peer.lon,peer.lat]);
    return diagramNode(peer,x,y,3.4,.45);
@@ -1321,13 +1330,13 @@ function itemRelations(item){
  };
 }
 function inheritedShapes(item){
- return [...BUILTIN_FEATURES,...items.filter(entry=>entry.geometry&&entry.geometry.type!=='Point')]
+ return [...new Map([...effectiveBuiltins(),...items.filter(entry=>!entry.deleted&&entry.geometry&&entry.geometry.type!=='Point')].map(entry=>[entry.id,entry])).values()]
    .filter(entry=>entry.links?.includes(item.id));
 }
 function relatedShapes(item,state=itemRelations(item),includeExcluded=false){
  const shapes=[...inheritedShapes(item),
-   ...state.natural.map(id=>NATURAL_BY_ID.get(id)),
-   ...state.related.map(id=>items.find(entry=>entry.id===id&&entry.geometry&&entry.geometry.type!=='Point'))];
+   ...state.natural.map(effectiveObject),
+   ...state.related.map(effectiveObject)];
  const byId=new Map(shapes.filter(Boolean).map(shape=>[shape.id,shape]));
  return [...byId.values()].filter(shape=>includeExcluded||!state.excluded.includes(shape.id));
 }
@@ -1665,25 +1674,28 @@ function customDiagram(item){
  return image?'<figure class="scheme custom-scheme"><img src="'+image+'" alt="Схема · '+esc(item.title)+'"></figure>':'';
 }
 function displayDiagram(item){
- return customDiagram(item)||((item.schemeZoom&&item.schemeZoom!==1||item.peers?.length||item.excluded?.length||item.natural?.length||item.related?.length)?relatedDiagram(item):(scheme(item)||relatedDiagram(item)));
+ return customDiagram(item)||((item.schemeAuto||item.schemePanX||item.schemePanY||item.schemeZoom&&item.schemeZoom!==1||item.peers?.length||item.excluded?.length||item.natural?.length||item.related?.length)?relatedDiagram(item):(scheme(item)||relatedDiagram(item)));
 }
 function setupSchemeEditor(item){
  const form=$('editorForm'),panel=$('schemeControls');
  let image=validCustomScheme(item.customScheme);
- panel.innerHTML='<label class="scheme-scale">Масштаб схемы<input id="schemeZoom" type="range" min="35" max="300" step="5" value="'+Math.round((item.schemeZoom||1)*100)+'" aria-label="Масштаб схемы"><output id="schemeZoomValue"></output></label><div id="schemePreview"></div><div class="scheme-upload"><button type="button" id="uploadScheme">Загрузить свою схему</button><input id="schemeFile" type="file" accept="image/png,image/jpeg,image/webp,image/svg+xml,.svg" hidden><button type="button" id="resetScheme">Автоматическая схема</button></div>';
+ let panX=finiteSchemeNumber(item.schemePanX),panY=finiteSchemeNumber(item.schemePanY),automatic=Boolean(item.schemeAuto);
+ panel.innerHTML='<label class="scheme-scale">Масштаб схемы<input id="schemeZoom" type="number" min="0.01" step="any" value="'+Number(((item.schemeZoom||1)*100).toPrecision(8))+'" aria-label="Масштаб схемы"><output id="schemeZoomValue">%</output></label><div id="schemePreview"></div><div class="scheme-navigation"><button type="button" id="schemeSmaller" aria-label="Уменьшить схему">−</button><button type="button" id="schemeLarger" aria-label="Увеличить схему">+</button><button type="button" id="schemeCenter">Центр города</button><button type="button" id="schemeFit">Вписать</button></div><div class="scheme-upload"><button type="button" id="uploadScheme">Загрузить свою схему</button><input id="schemeFile" type="file" accept="image/png,image/jpeg,image/webp,image/svg+xml,.svg" hidden><button type="button" id="resetScheme">Автоматическая схема</button></div>';
  const slider=$('schemeZoom');
- form.readSchemeZoom=()=>Number(slider.value)/100;
+ form.readSchemeZoom=()=>positiveSchemeZoom(Number(slider.value)/100);
+ form.readSchemeView=()=>({schemePanX:panX,schemePanY:panY,schemeAuto:automatic});
  form.readCustomScheme=()=>image;
  form.renderSchemePreview=()=>{
-   $('schemeZoomValue').textContent=slider.value+'%';
+   $('schemeZoomValue').textContent='%';
    slider.disabled=Boolean(image);$('resetScheme').hidden=!image;
+   for(const button of panel.querySelectorAll('.scheme-navigation button'))button.disabled=Boolean(image);
    const state=form.readRelations?.()||item;
-   const draft={...item,...state,schemeZoom:form.readSchemeZoom(),customScheme:image};
+   const draft={...item,...state,schemeZoom:form.readSchemeZoom(),schemePanX:panX,schemePanY:panY,schemeAuto:automatic,customScheme:image};
    $('schemePreview').innerHTML=displayDiagram(draft);
  };
- slider.oninput=()=>{dirty=true;form.renderSchemePreview();};
+ slider.oninput=()=>{automatic=true;dirty=true;form.renderSchemePreview();};
  $('uploadScheme').onclick=()=>$('schemeFile').click();
- $('resetScheme').onclick=()=>{image='';dirty=true;form.renderSchemePreview();};
+ $('resetScheme').onclick=()=>{image='';automatic=true;dirty=true;form.renderSchemePreview();};
  $('schemeFile').onchange=async event=>{
    const file=event.target.files[0];if(!file)return;
    const mime=file.type||(/\.svg$/i.test(file.name)?'image/svg+xml':'');
@@ -1696,7 +1708,67 @@ function setupSchemeEditor(item){
    }catch{toast('Не удалось загрузить схему');}
    event.target.value='';
  };
+ const preview=$('schemePreview');
+ function zoom(factor,x=155,y=61){
+   if(image)return;
+   const old=form.readSchemeZoom(),next=positiveSchemeZoom(old*factor),ratio=next/old;
+   panX=x-155-(x-155-panX)*ratio;panY=y-61-(y-61-panY)*ratio;
+   slider.value=String(Number((next*100).toPrecision(8)));automatic=true;dirty=true;form.renderSchemePreview();
+ }
+ $('schemeSmaller').onclick=()=>zoom(1/1.4);$('schemeLarger').onclick=()=>zoom(1.4);
+ $('schemeFit').onclick=()=>{panX=0;panY=0;slider.value='100';automatic=true;dirty=true;form.renderSchemePreview();};
+ $('schemeCenter').onclick=()=>{
+   automatic=true;form.renderSchemePreview();
+   const city=preview.querySelector('[data-city-anchor] circle');if(!city)return;
+   panX+=155-Number(city.getAttribute('cx'));panY+=61-Number(city.getAttribute('cy'));dirty=true;form.renderSchemePreview();
+ };
+ preview.addEventListener('wheel',event=>{
+   const svg=preview.querySelector('svg');if(image||!svg||!svg.contains(event.target))return;
+   event.preventDefault();const rect=svg.getBoundingClientRect();
+   zoom(Math.exp(-clamp(event.deltaY,-150,150)*.003),(event.clientX-rect.left)*310/rect.width,(event.clientY-rect.top)*122/rect.height);
+ },{passive:false});
+ let drag=null;
+ preview.addEventListener('pointerdown',event=>{
+   const svg=preview.querySelector('svg');if(image||!svg||!svg.contains(event.target)||event.button!==0)return;
+   const rect=svg.getBoundingClientRect();drag={id:event.pointerId,x:event.clientX,y:event.clientY,panX,panY,width:rect.width,height:rect.height};
+   preview.setPointerCapture(event.pointerId);event.preventDefault();
+ });
+ preview.addEventListener('pointermove',event=>{
+   if(drag?.id!==event.pointerId)return;
+   panX=drag.panX+(event.clientX-drag.x)*310/drag.width;panY=drag.panY+(event.clientY-drag.y)*122/drag.height;
+   automatic=true;dirty=true;form.renderSchemePreview();
+ });
+ const end=event=>{if(drag?.id===event.pointerId)drag=null;};
+ preview.addEventListener('pointerup',end);preview.addEventListener('pointercancel',end);preview.addEventListener('lostpointercapture',end);
  form.renderSchemePreview();
+}
+
+function finiteSchemeNumber(value){return Number.isFinite(Number(value))?Number(value):0;}
+function positiveSchemeZoom(value){const number=Number(value);return Number.isFinite(number)&&number>0?Math.max(.0001,number):1;}
+
+;
+function sourceObject(id){return BUILTIN_FEATURES.find(feature=>feature.id===id)||NATURAL_BY_ID.get(id);}
+function effectiveObject(id){
+ const edited=items.find(item=>item.id===id);
+ return edited?.deleted?null:edited||sourceObject(id);
+}
+function effectiveBuiltins(){return BUILTIN_FEATURES.map(feature=>effectiveObject(feature.id)).filter(Boolean);}
+function openObjectEditor(id){
+ if(items.some(item=>item.id===id))return true;
+ const original=sourceObject(id);if(!original)return false;
+ if(items.length>=400){toast('Достигнут предел объектов атласа');return false;}
+ const geometry=structuredClone(original.geometry),[lon,lat]=geometryAnchor(geometry);
+ const linked=items.filter(city=>isCity(city)&&(city.natural?.includes(id)||city.related?.includes(id))).map(city=>city.id);
+ items.push({id,type:original.type,title:original.title,geometry,lon,lat,links:[...new Set([...(original.links||[]),...linked])],article:'',place:'',angle:0,size:1,natural:[],related:[],excluded:[],peers:[]});
+ return true;
+}
+function naturalOverrideIds(){
+ const ids=new Set();
+ for(const item of items){
+   const source=NATURAL_BY_ID.get(item.id);if(!source)continue;
+   ids.add(item.id);for(const id of source.parts||[])ids.add(id);
+ }
+ return ids;
 }
 
 ;
@@ -1773,7 +1845,7 @@ function normalize(arr){
    const geometry=raw.geometry?(type==='lake'?waterArea(readGeometry(raw.geometry)):readGeometry(raw.geometry)):null;
    const links=Array.isArray(raw.links)?[...new Set(raw.links.filter(id=>typeof id==='string'&&/^[\w-]{1,60}$/.test(id)))].slice(0,400):[];
    const natural=Array.isArray(raw.natural)?[...new Set(raw.natural.filter(id=>NATURAL_BY_ID.has(id)))].slice(0,100):[];
-   return {id,type,customScheme:validCustomScheme(raw.customScheme),schemeZoom:clamp(Number(raw.schemeZoom)||1,.35,3),...(!raw.geometry||raw.geometry.type==='Point'?{types,sections}:{}),natural,excluded:drawingIds(raw.excluded),related:drawingIds(raw.related),peers:drawingIds(raw.peers).filter(peer=>peer!==id),...(geometry?{geometry,links}:{}),title:String(raw.title||TYPES[type].name).trim().slice(0,100)||TYPES[type].name,place:String(raw.place||'').trim().slice(0,100),lat:clamp(raw.lat,-MAX_LAT,MAX_LAT),lon:wrap(raw.lon),angle:clamp(Number(raw.angle)||0,-180,180),size:clamp(Number(raw.size)||1,.7,1.5),article:cleanHTML(raw.article),...(original?{example:original.example,source:original.source,lesson:original.lesson,number:original.number,pages:original.pages}:{})};
+   return {id,type,...(raw.deleted&&sourceObject(id)?{deleted:true}:{}),customScheme:validCustomScheme(raw.customScheme),schemeZoom:positiveSchemeZoom(raw.schemeZoom),schemePanX:finiteSchemeNumber(raw.schemePanX),schemePanY:finiteSchemeNumber(raw.schemePanY),schemeAuto:Boolean(raw.schemeAuto),...(!raw.geometry||raw.geometry.type==='Point'?{types,sections}:{}),natural,excluded:drawingIds(raw.excluded),related:drawingIds(raw.related),peers:drawingIds(raw.peers).filter(peer=>peer!==id),...(geometry?{geometry,links}:{}),title:String(raw.title||TYPES[type].name).trim().slice(0,100)||TYPES[type].name,place:String(raw.place||'').trim().slice(0,100),lat:clamp(raw.lat,-MAX_LAT,MAX_LAT),lon:wrap(raw.lon),angle:clamp(Number(raw.angle)||0,-180,180),size:clamp(Number(raw.size)||1,.7,1.5),article:cleanHTML(raw.article),...(original?{example:original.example,source:original.source,lesson:original.lesson,number:original.number,pages:original.pages}:{})};
  });
 }
 const BASE_V2=BASE+'-lectures';
@@ -1814,12 +1886,12 @@ function inCollection(item){
  return regions[collectionFilter]?.has(item.id.slice(4))||false;
 }
 const ofLayer=(item,which)=>which==='all'||(which==='lecture'?Boolean(item.lesson):!item.lesson);
-const visibleItems=()=>items.filter(item=>inCollection(item)&&ofLayer(item,layer)&&(typeFilter==='any'||configurationTypes(item).includes(typeFilter)));
+const visibleItems=()=>items.filter(item=>!item.deleted&&inCollection(item)&&ofLayer(item,layer)&&(typeFilter==='any'||configurationTypes(item).includes(typeFilter)));
 let selected=null,activeTool=null,moving=false,dirty=false,editPoint=null;
 const map=$('map'), markers=$('markers'), labels=$('labels'), basemap=$('basemap'), detail=$('detail');
 const vis={lon:20,y:py(37),zoom:1,width:1,height:1,base:1};
 let markerEls=[], toastTimer, renderHandle=0, pointer=null, editorRange=null, insertKind=null;
-const chosen=()=>items.find(item=>item.id===selected);
+const chosen=()=>effectiveObject(selected);
 function toast(message){
  $('toast').textContent=message;$('toast').hidden=false;clearTimeout(toastTimer);toastTimer=setTimeout(()=>{$('toast').hidden=true},2800);
 }
@@ -1896,9 +1968,8 @@ function draw(){
    const [x,y]=point(lon,lat);add(str,x,y,kind);
  }
  if(showMountains&&k>=12){
-   for(const range of MOUNTAIN_LIBRARY){
-     const coords=range.geometry.coordinates;
-     const [x,y]=point(...coords[Math.floor(coords.length/2)]);
+   for(const range of MOUNTAIN_LIBRARY.map(feature=>effectiveObject(feature.id)).filter(Boolean)){
+     const [x,y]=point(...geometryAnchor(range.geometry));
      add(range.title,x,y-9,'range');
    }
  }
@@ -1939,7 +2010,7 @@ function renderFilter(){
    button.dataset.count=items.filter(item=>ofLayer(item,group)).length;
  }
  $('typeFilter').hidden=layer==='work';
- const filter=$('typeSelect'), relevant=new Set(items.filter(item=>inCollection(item)&&ofLayer(item,layer)).flatMap(configurationTypes));
+ const filter=$('typeSelect'), relevant=new Set(items.filter(item=>!item.deleted&&inCollection(item)&&ofLayer(item,layer)).flatMap(configurationTypes));
  filter.innerHTML='<option value="any">Все типы</option>'+Object.entries(TYPES).filter(([type])=>relevant.has(type)).map(([type,t])=>'<option value="'+type+'">'+t.name+'</option>').join('');
  if(typeFilter!=='any'&&!relevant.has(typeFilter))filter.add(new Option(TYPES[typeFilter].name,typeFilter));
  refreshCollectionHighlight();
@@ -1996,6 +2067,7 @@ function closeDetail(){
 function selectItem(id){
  if(id===selected)return;
  if(mode==='edit'&&dirty)commit();
+ if(mode==='edit'&&!openObjectEditor(id))return;
  selected=id;activeTool=null;moving=false;editPoint=null;dirty=false;render();
 }
 function renderDetail(){
@@ -2005,7 +2077,7 @@ function renderDetail(){
  if(detail.hidden){
    detail.replaceChildren();return;
  }
- if(mode==='edit'){renderEditor(item);return;}
+ if(mode==='edit'){if(openObjectEditor(item.id))renderEditor(chosen());return;}
  const type=TYPES[item.type];
  const refs=[...(item.source||[]),...(MARINE_SOURCES[item.id]?[MARINE_SOURCES[item.id]]:[])].map(([name,url])=>'<a href="'+esc(url)+'" target="_blank" rel="noopener noreferrer">'+esc(name)+'</a>').join(' · ');
  detail.innerHTML='<article class="detail-inner"><div class="detail-top"><div class="detail-type" '+tone(item.type)+'><span class="detail-symbol">'+glyph(item.type)+'</span>'+type.name+'</div><button id="closeItem" class="detail-close" aria-label="Закрыть" title="Закрыть">'+icon('close')+'</button></div><h2>'+esc(item.title)+'</h2><div class="subline">'+icon('pin')+(item.place?esc(item.place)+'<span class="divider">·</span>':'')+'<span class="coordinates">'+coord(item)+'</span></div>'+(item.lesson?'<div class="lecture-reference"><span>Лекция '+item.lesson+' · пример '+esc(item.number)+'</span><small>Печатное издание 2006 г., с. '+esc(item.pages)+'</small></div>':'')+displayDiagram(item)+articleSections(item)+(refs?'<p class="article-source">Для справки: '+refs+'</p>':'')+'</article>';
@@ -2074,7 +2146,7 @@ function renderEditor(item){
  };
  $('deleteItem').onclick=()=>{$('deleteConfirm').hidden=false;};
  $('deleteNo').onclick=()=>{$('deleteConfirm').hidden=true;};
- $('deleteYes').onclick=()=>{items=items.filter(n=>n.id!==item.id);for(const candidate of items){if(candidate.links)candidate.links=candidate.links.filter(id=>id!==item.id);if(candidate.peers)candidate.peers=candidate.peers.filter(id=>id!==item.id);}for(const set of userCollections)set.cities=set.cities.filter(id=>id!==item.id);selected=null;dirty=false;moving=false;editPoint=null;saveMessage(persist(),'Знак удалён');render();};
+ $('deleteYes').onclick=()=>{if(sourceObject(item.id)){item.deleted=true;}else items=items.filter(n=>n.id!==item.id);for(const candidate of items){if(candidate.links)candidate.links=candidate.links.filter(id=>id!==item.id);if(candidate.peers)candidate.peers=candidate.peers.filter(id=>id!==item.id);}for(const set of userCollections)set.cities=set.cities.filter(id=>id!==item.id);selected=null;dirty=false;moving=false;editPoint=null;saveMessage(persist(),'Знак удалён');render();};
  bindArticleEditors(detail);
  if(!shape)setupConfigurationEditor(item);
  else $('itemType').onchange=()=>{const label=TYPES[$('itemType').value].name;detail.querySelector('.editor-top h2').textContent=label;detail.setAttribute('aria-label',label);};
@@ -2084,7 +2156,7 @@ function renderEditor(item){
 function commit(notify=false){
  const item=chosen(), input=$('itemTitle');
  if(!item||!input)return false;
- const replacement={...item,...(editPoint||{}),type:$('itemType').value,...($('editorForm').readConfigurations?.()||{}),schemeZoom:$('editorForm').readSchemeZoom?.()||item.schemeZoom||1,customScheme:$('editorForm').readCustomScheme?.()||'',title:input.value.trim()||TYPES[$('itemType').value].name,...($('editorForm').readRelations?.()||{}),place:$('itemPlace').value.trim(),...(item.geometry?{geometry:item.geometry.type==='Point'&&editPoint?{type:'Point',coordinates:[editPoint.lon,editPoint.lat]}:item.geometry,links:$('editorForm').readLinks?.()||item.links||[]}:{}),article:cleanHTML($('editorText').innerHTML)};
+ const replacement={...item,...(editPoint||{}),type:$('itemType').value,...($('editorForm').readConfigurations?.()||{}),schemeZoom:$('editorForm').readSchemeZoom?.()||item.schemeZoom||1,...($('editorForm').readSchemeView?.()||{}),customScheme:$('editorForm').readCustomScheme?.()||'',title:input.value.trim()||TYPES[$('itemType').value].name,...($('editorForm').readRelations?.()||{}),place:$('itemPlace').value.trim(),...(item.geometry?{geometry:item.geometry.type==='Point'&&editPoint?{type:'Point',coordinates:[editPoint.lon,editPoint.lat]}:item.geometry,links:$('editorForm').readLinks?.()||item.links||[]}:{}),article:cleanHTML($('editorText').innerHTML)};
  if(replacement.type==='lake'&&replacement.geometry){
    try{replacement.geometry=waterArea(replacement.geometry);}catch{toast('Для водного объекта нужны хотя бы три вершины');return false;}
  }
@@ -2283,7 +2355,11 @@ map.addEventListener('pointerup',e=>{
    linkNaturalAt(e.clientX-rect.left,e.clientY-rect.top,e.pointerType==='touch'?14:8,e.altKey);
    return;
  }
- if(!(activeTool||moving||drawing))return;
+ if(!(activeTool||moving||drawing)){
+   const hit=findNaturalHit(e.clientX-rect.left,e.clientY-rect.top,e.pointerType==='touch'?14:8,e.altKey);
+   if(hit)selectItem(hit.feature.id);
+   return;
+ }
  const r=map.getBoundingClientRect(), pos=unpoint(e.clientX-r.left,e.clientY-r.top-map.clientTop);
  handleMapPosition(pos.lon,pos.lat);
 });
