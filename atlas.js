@@ -1134,11 +1134,11 @@ function renderSpatial(){
  const display=new Map([...effectiveBuiltins().filter(shape=>shape.links.some(id=>matching.has(id))),
    ...items.filter(item=>!item.deleted&&item.geometry&&item.geometry.type!=='Point'&&(matching.has(item.id)||item.links?.some(id=>matching.has(id)))),
    ...related].map(shape=>[shape.id,shape]));
- const shapes=[...display.values()];
+ const shapes=[...display.values()].filter(shape=>shape.id!==drawing?.replacing);
  if(drawing?.points.length){
    const points=drawing.points.slice();
-   if(drawing.cursor)points.push(drawing.cursor);
-   if(points.length>1)shapes.push({id:'draft-shape',type:drawing.type,geometry:{type:drawing.area&&points.length>=3?'Polygon':'LineString',coordinates:drawing.area&&points.length>=3?[points]:points}});
+   if(drawing.cursor&&!drawing.editing)points.push(drawing.cursor);
+   if(drawing.editing||points.length>1)shapes.push({id:'draft-shape',type:drawing.type,geometry:drawing.editing?drawing.geometry:{type:drawing.area&&points.length>=3?'Polygon':'LineString',coordinates:drawing.area&&points.length>=3?[points]:points}});
  }
  const highlighted=shape=>shape.id==='draft-shape'||shape.id===current?.id||selectedShapes.has(shape.id)||Boolean(current?.links?.includes(shape.id));
  const overlay=document.createDocumentFragment();
@@ -1161,7 +1161,7 @@ function renderSpatial(){
      const path=svgNode('path',{d,class:part.area?'area':'line','fill-rule':'evenodd'});
      if(shape.type==='lake'&&part.area&&(isCustom||shape.id==='draft-shape')){
        path.setAttribute('class','water-fill');group.append(path);
-       const open=openWaterPaths(part.paths).map(ring=>pathFor(ring,false)).join(' ');
+       const open=d;
        group.append(svgNode('path',{d:open,class:'line'}));
      }else group.append(path);
      if((isCustom||mode==='edit')&&!drawing&&!moving){
@@ -1189,12 +1189,6 @@ function renderSpatial(){
      }
    }
    overlay.append(group);
- }
- if(drawing){
-   for(const location of drawing.points){
-     const [cx,cy]=point(...location);
-     overlay.append(svgNode('circle',{class:'drawing-vertex',cx,cy,r:4}));
-   }
  }
  layerElement.replaceChildren(overlay);
 }
@@ -1229,7 +1223,7 @@ function relatedDiagram(item){
    const d=paths.map(path=>path.map((coord,i)=>(i?'L':'M')+position(coord).join(' ')).join(' ')+(area?'Z':'')).join(' ');
    const color=TYPES[feature.type].tone;
    if(feature.type==='lake'&&area&&feature.article!==undefined){
-     const outline=openWaterPaths(paths).map(path=>path.map((coord,i)=>(i?'L':'M')+position(coord).join(' ')).join(' ')).join(' ');
+     const outline=d;
      return '<path d="'+d+'" fill="'+color+'" fill-opacity=".25" fill-rule="evenodd"/><path d="'+outline+'" fill="none" stroke="'+color+'" stroke-width="1.8"/>';
    }
    const dash=['barrier','frontier','vector','current'].includes(feature.type)?' stroke-dasharray="5 3"':'';
@@ -1723,8 +1717,9 @@ function setupSchemeEditor(item){
    panX+=155-Number(city.getAttribute('cx'));panY+=61-Number(city.getAttribute('cy'));dirty=true;form.renderSchemePreview();
  };
  preview.addEventListener('wheel',event=>{
-   const svg=preview.querySelector('svg');if(image||!svg||!svg.contains(event.target))return;
-   event.preventDefault();const rect=svg.getBoundingClientRect();
+   event.preventDefault();event.stopPropagation();
+   const svg=preview.querySelector('svg');if(image||!svg)return;
+   const rect=svg.getBoundingClientRect();
    zoom(Math.exp(-clamp(event.deltaY,-150,150)*.003),(event.clientX-rect.left)*310/rect.width,(event.clientY-rect.top)*122/rect.height);
  },{passive:false});
  let drag=null;
@@ -1769,6 +1764,94 @@ function naturalOverrideIds(){
    ids.add(item.id);for(const id of source.parts||[])ids.add(id);
  }
  return ids;
+}
+
+;
+let geometryDrag=null;
+let geometryListeners=null;
+function editableGeometryPaths(){
+ if(!drawing)return [];
+ if(drawing.editing){
+   function paths(geometry){
+     if(geometry.type==='GeometryCollection')return geometry.geometries.flatMap(paths);
+     if(geometry.type==='MultiPoint')return [{points:geometry.coordinates,pointSet:true,area:false}];
+     if(geometry.type==='Point')return [{points:[geometry.coordinates],pointSet:true,owner:geometry,area:false}];
+     return geometryParts(geometry).flatMap(part=>(part.paths||[]).map(points=>({points,area:part.area})));
+   }
+   return paths(drawing.geometry);
+ }
+ return [{points:drawing.points,area:drawing.area}];
+}
+function beginGeometrySession(){
+ endGeometrySession();
+ const overlay=$('geometryHandles');
+ const controller=new AbortController();geometryListeners=controller;
+ const options={signal:controller.signal};
+ let lastVertex=null;
+ function position(event){const rect=map.getBoundingClientRect();const pos=unpoint(event.clientX-rect.left,event.clientY-rect.top);return [pos.lon,pos.lat];}
+ overlay.addEventListener('pointerdown',event=>{
+   if(event.button!==0||!drawing)return;
+   const target=event.target.closest('[data-vertex],[data-edge]');if(!target)return;
+   event.preventDefault();event.stopPropagation();
+   const pathIndex=Number(target.dataset.path),path=editableGeometryPaths()[pathIndex];
+   let index;
+   if(target.dataset.edge!==undefined){
+     index=Number(target.dataset.edge)+1;path.points.splice(index,0,position(event));
+   }else index=Number(target.dataset.vertex);
+   lastVertex=target.dataset.edge===undefined?{path:pathIndex,index}:null;
+   geometryDrag={id:event.pointerId,path:pathIndex,index};
+   drawing.cursor=null;overlay.setPointerCapture(event.pointerId);
+   if(target.dataset.edge!==undefined){refresh();updatePalette();}
+ },options);
+ overlay.addEventListener('pointermove',event=>{
+   if(geometryDrag?.id!==event.pointerId)return;
+   event.preventDefault();event.stopPropagation();
+   const path=editableGeometryPaths()[geometryDrag.path];
+   if(path){const coordinate=position(event);if(path.owner)path.owner.coordinates=coordinate;else path.points[geometryDrag.index]=coordinate;}
+   refresh();
+ },options);
+ const finishDrag=event=>{
+   if(geometryDrag?.id!==event.pointerId)return;
+   event.stopPropagation();geometryDrag=null;updatePalette();
+ };
+ overlay.addEventListener('pointerup',finishDrag,options);
+ overlay.addEventListener('pointercancel',finishDrag,options);
+ overlay.addEventListener('lostpointercapture',finishDrag,options);
+ overlay.addEventListener('dblclick',event=>{
+   const vertex=event.target.closest('[data-vertex]');
+   const selected=vertex?{path:Number(vertex.dataset.path),index:Number(vertex.dataset.vertex)}:lastVertex;
+   if(!selected||!drawing)return;
+   event.preventDefault();event.stopPropagation();
+   const path=editableGeometryPaths()[selected.path];
+   if(path.points.length<=(path.pointSet?1:path.area?3:2)){toast(path.pointSet?'В объекте должна остаться хотя бы одна точка':path.area?'У контура должно остаться не меньше трёх вершин':'У линии должно остаться не меньше двух вершин');return;}
+   path.points.splice(selected.index,1);geometryDrag=null;lastVertex=null;updatePalette();refresh();
+ },options);
+}
+function endGeometrySession(){
+ geometryListeners?.abort();geometryListeners=null;geometryDrag=null;
+ $('geometryHandles')?.replaceChildren();
+}
+function renderGeometryHandles(){
+ const overlay=$('geometryHandles');
+ if(mode!=='edit'||!drawing){if(overlay.children.length)overlay.replaceChildren();return;}
+ const fragment=document.createDocumentFragment();
+ for(const [pathIndex,{points,area,pointSet}] of editableGeometryPaths().entries()){
+   const screen=toScreenPath(points);
+   const edgeCount=pointSet?0:area&&points.length>=3?points.length:points.length-1;
+   for(let index=0;index<edgeCount;index++){
+     const first=screen[index],second=screen[(index+1)%points.length];
+     if(Math.max(first[0],second[0])<0||Math.min(first[0],second[0])>vis.width||Math.max(first[1],second[1])<0||Math.min(first[1],second[1])>vis.height)continue;
+     fragment.append(svgNode('path',{d:'M'+first.join(' ')+'L'+second.join(' '),class:'geometry-edge','data-path':pathIndex,'data-edge':index}));
+     if(Math.hypot(first[0]-second[0],first[1]-second[1])>25){
+       fragment.append(svgNode('circle',{cx:(first[0]+second[0])/2,cy:(first[1]+second[1])/2,r:3,class:'geometry-midpoint','data-path':pathIndex,'data-edge':index}));
+     }
+   }
+   for(const [index,[cx,cy]] of screen.entries()){
+     if(cx<-9||cx>vis.width+9||cy<-9||cy>vis.height+9)continue;
+     fragment.append(svgNode('circle',{cx,cy,r:5,class:'geometry-vertex','data-path':pathIndex,'data-vertex':index}));
+   }
+ }
+ overlay.replaceChildren(fragment);
 }
 
 ;
@@ -1952,6 +2035,7 @@ function draw(){
  }
  drawTiles();
  renderSpatial();
+ if(mode==='edit')renderGeometryHandles();
  const fragment=document.createDocumentFragment();
  function add(str,x,y,kind){
    if(x<24||x>w-21||y<15||y>h-26)return;
@@ -2108,7 +2192,7 @@ function renderEditor(item){
  detail.setAttribute('aria-label',editorLabel);
  const legacy=!item.geometry&&LINE_TYPES.has(item.type);
  const options=Object.entries(TYPES).filter(([key])=>shape||CITY_TYPES.includes(key)||key===item.type).map(([k,t])=>'<option value="'+k+'"'+(k===item.type?' selected':'')+'>'+t.name+'</option>').join('');
- detail.innerHTML='<div class="detail-inner"><div class="editor-top"><div><h2>'+esc(editorLabel)+'</h2></div><button id="closeItem" class="detail-close" aria-label="Закрыть" title="Закрыть">'+icon('close')+'</button></div><form id="editorForm"><div class="editor-fields"><label>Название<input id="itemTitle" value="'+esc(item.title)+'" maxlength="100" required></label><label>Место или страна<input id="itemPlace" value="'+esc(item.place)+'" maxlength="100" placeholder="Например, Германия"></label><label>Условный знак<select id="itemType" aria-label="Условный знак">'+options+'</select></label><div class="editor-location"><span class="coordinates" id="editCoord">'+coord(item)+'</span><button type="button" id="moveItem">'+icon('pin')+(shape?' Перерисовать':legacy?' Нарисовать':' Перенести')+'</button></div></div>'+(shape?'<div id="linkControls"></div>':'<div id="configurationControls"></div><div id="naturalControls"></div><div id="peerControls"></div><div id="cityCollections"></div>')+'<div id="schemeControls"></div>'+editorToolbar()+'<div id="editorText" role="textbox" aria-label="Текст статьи" aria-multiline="true" class="article-body editable" contenteditable="true" data-placeholder="Опишите, как конфигурация повлияла на появление города…">'+item.article+'</div><div id="additionalArticles"></div><div class="detail-actions editor-actions"><button type="submit" class="primary">'+icon('check')+' Сохранить</button><button type="button" id="deleteItem" class="delete">'+icon('trash')+' Удалить</button></div><div id="deleteConfirm" class="delete-confirm" hidden>Удалить знак и его статью?<br><button type="button" id="deleteYes">Удалить</button><button type="button" id="deleteNo">Отмена</button></div></form></div>';
+ detail.innerHTML='<div class="detail-inner"><div class="editor-top"><div><h2>'+esc(editorLabel)+'</h2></div><button id="closeItem" class="detail-close" aria-label="Закрыть" title="Закрыть">'+icon('close')+'</button></div><form id="editorForm"><div class="editor-fields"><label>Название<input id="itemTitle" value="'+esc(item.title)+'" maxlength="100" required></label><label>Место или страна<input id="itemPlace" value="'+esc(item.place)+'" maxlength="100" placeholder="Например, Германия"></label><label>Условный знак<select id="itemType" aria-label="Условный знак">'+options+'</select></label><div class="editor-location"><span class="coordinates" id="editCoord">'+coord(item)+'</span><button type="button" id="moveItem">'+icon('pin')+(shape?' Изменить геометрию':legacy?' Нарисовать':' Перенести')+'</button></div></div>'+(shape?'<div id="linkControls"></div>':'<div id="configurationControls"></div><div id="naturalControls"></div><div id="peerControls"></div><div id="cityCollections"></div>')+'<div id="schemeControls"></div>'+editorToolbar()+'<div id="editorText" role="textbox" aria-label="Текст статьи" aria-multiline="true" class="article-body editable" contenteditable="true" data-placeholder="Опишите, как конфигурация повлияла на появление города…">'+item.article+'</div><div id="additionalArticles"></div><div class="detail-actions editor-actions"><button type="submit" class="primary">'+icon('check')+' Сохранить</button><button type="button" id="deleteItem" class="delete">'+icon('trash')+' Удалить</button></div><div id="deleteConfirm" class="delete-confirm" hidden>Удалить знак и его статью?<br><button type="button" id="deleteYes">Удалить</button><button type="button" id="deleteNo">Отмена</button></div></form></div>';
  $('closeItem').onclick=closeDetail;
  let links=[...(item.links||[])];
  if(shape){
@@ -2177,16 +2261,16 @@ function updatePalette(){
  $('palette').hidden=!editing;
  for(const control of $('tools').children)control.setAttribute('aria-pressed',String(control.dataset.tool===activeTool||control.dataset.tool===drawing?.tool));
  $('drawingActions').hidden=!(drawing||activeTool||moving);
- $('paletteHelp').textContent=drawing?'Укажите вершины':moving?'Укажите новое место':'Укажите точку';
+ $('paletteHelp').textContent=drawing?(drawing.editing?'Тяните вершины или рёбра · двойной щелчок удаляет вершину · правая кнопка завершает':'Укажите вершины · правая кнопка завершает'):moving?'Укажите новое место':'Укажите точку';
  $('finishDrawing').hidden=!drawing;
- $('finishDrawing').disabled=Boolean(drawing&&drawing.points.length<(drawing.area?3:2));
+ $('finishDrawing').disabled=Boolean(drawing&&!drawing.editing&&drawing.points.length<(drawing.area?3:2));
  map.classList.toggle('placing',editing&&Boolean(activeTool||moving||drawing));
  if($('moveItem'))$('moveItem').classList.toggle('is-active',moving);
 }
 function render(){renderItems();renderDetail();updatePalette();}
 function setMode(next){
  if(mode==='edit'&&dirty)commit();
- mode=next;activeTool=null;moving=false;drawing=null;render();
+ endGeometrySession();mode=next;activeTool=null;moving=false;drawing=null;render();
 }
 function freshId(){
  return typeof crypto.randomUUID==='function'?crypto.randomUUID():'local-'+Date.now()+'-'+Math.random().toString(36).slice(2,10);
@@ -2201,6 +2285,7 @@ function appendItem(type,lon,lat,rest={}){
 }
 function handleMapPosition(lon,lat){
  if(drawing){
+   if(drawing.editing)return;
    const last=drawing.points.at(-1);
    if(!last||last[0]!==lon||last[1]!==lat)drawing.points.push([lon,lat]);
    drawing.cursor=null;updatePalette();refresh();return;
@@ -2223,18 +2308,29 @@ function startDrawing(type,area,replacing=null,tool=type){
  const item=chosen();
  const city=!replacing&&item&&(!item.geometry||item.geometry.type==='Point')&&!LINE_TYPES.has(item.type)?item.id:null;
  drawing={type,area:type==='lake'||area,replacing,city,tool,points:[],cursor:null};
+ if(replacing){
+   const original=items.find(candidate=>candidate.id===replacing)?.geometry;
+   if(original){
+     drawing.editing=true;drawing.geometry=structuredClone(original);
+     for(const part of geometryParts(drawing.geometry))for(const ring of part.paths||[]){
+       if(part.area&&ring.length>1&&ring[0][0]===ring.at(-1)[0]&&ring[0][1]===ring.at(-1)[1])ring.pop();
+     }
+     drawing.points=editableGeometryPaths()[0]?.points||[];
+   }
+ }
+ beginGeometrySession();
  activeTool=null;moving=false;detail.hidden=true;updatePalette();refresh();
 }
 function finishDrawing(){
- if(!drawing||drawing.points.length<(drawing.area?3:2))return;
+ if(!drawing||!drawing.editing&&drawing.points.length<(drawing.area?3:2))return;
  const {area,points,type,city,replacing}=drawing;
- if(new Set(points.map(point=>point.join(','))).size<(area?3:2)){toast('Укажите разные вершины');return;}
+ if(!drawing.editing&&new Set(points.map(point=>point.join(','))).size<(area?3:2)){toast('Укажите разные вершины');return;}
  let geometry;
  try{
-   geometry=readGeometry(area?{type:'Polygon',coordinates:[points]}:{type:'LineString',coordinates:points});
+   geometry=readGeometry(drawing.editing?drawing.geometry:area?{type:'Polygon',coordinates:[points]}:{type:'LineString',coordinates:points});
  }catch{toast('Укажите разные вершины');return;}
  const [lon,lat]=geometryAnchor(geometry);
- drawing=null;
+ endGeometrySession();drawing=null;
  if(replacing){
    const item=items.find(candidate=>candidate.id===replacing);
    Object.assign(item,{lon,lat,geometry,links:item.links||[]});selected=replacing;
@@ -2243,7 +2339,7 @@ function finishDrawing(){
  appendItem(type,lon,lat,{geometry,links:city?[city]:[]});
 }
 function cancelDrawing(){
- drawing=null;activeTool=null;moving=false;renderDetail();updatePalette();refresh();
+ endGeometrySession();drawing=null;activeTool=null;moving=false;renderDetail();updatePalette();refresh();
 }
 $('finishDrawing').onclick=finishDrawing;
 $('cancelDrawing').onclick=cancelDrawing;
@@ -2338,7 +2434,7 @@ map.addEventListener('pointermove',e=>{
    const rect=map.getBoundingClientRect();
    showNaturalHover(e.clientX-rect.left,e.clientY-rect.top,e.altKey);
  }
- if(!pointer&&drawing){const rect=map.getBoundingClientRect();const pos=unpoint(e.clientX-rect.left,e.clientY-rect.top);drawing.cursor=[pos.lon,pos.lat];refresh();}
+ if(!pointer&&drawing&&!drawing.editing){const rect=map.getBoundingClientRect();const pos=unpoint(e.clientX-rect.left,e.clientY-rect.top);drawing.cursor=[pos.lon,pos.lat];refresh();}
  if(pointer?.id!==e.pointerId)return;
  const dx=e.clientX-pointer.x,dy=e.clientY-pointer.y;
  if(!pointer.dragged&&Math.hypot(dx,dy)<4)return;
@@ -2362,6 +2458,12 @@ map.addEventListener('pointerup',e=>{
  }
  const r=map.getBoundingClientRect(), pos=unpoint(e.clientX-r.left,e.clientY-r.top-map.clientTop);
  handleMapPosition(pos.lon,pos.lat);
+});
+map.addEventListener('contextmenu',event=>{
+ if(mode!=='edit'||!drawing)return;
+ event.preventDefault();event.stopPropagation();
+ if(!drawing.editing&&drawing.points.length<(drawing.area?3:2)){toast(drawing.area?'Укажите минимум три вершины':'Укажите минимум две вершины');return;}
+ finishDrawing();
 });
 map.addEventListener('pointerleave',clearNaturalHover);
 function cancelMapPointer(e){
@@ -2388,7 +2490,7 @@ map.addEventListener('keydown',e=>{
  case '-':zoomBy(1/1.55);break;
  case 'Home':reset();break;
  case 'Enter':if(naturalPicking){linkNaturalAt(vis.width/2,vis.height/2);break;}
-   if(drawing&&drawing.points.length>=(drawing.area?3:2)){finishDrawing();break;}
+   if(drawing&&(drawing.editing||drawing.points.length>=(drawing.area?3:2))){finishDrawing();break;}
    if(mode!=='edit'||!(activeTool||moving||drawing))return;
    {const pos=unpoint(vis.width/2,vis.height/2);handleMapPosition(pos.lon,pos.lat);}break;
  default:return;
