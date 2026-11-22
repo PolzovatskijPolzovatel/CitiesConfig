@@ -159,6 +159,8 @@ html,body,#workspace{width:100%;height:100%;overflow:hidden}
 .custom-scheme img{display:block;width:100%;height:auto;object-fit:contain}.scheme-upload{display:flex;gap:5px;flex-wrap:wrap;margin:6px 0 12px}.scheme-upload button{font-size:11px;padding:5px 8px}
 
 .scheme-scale{display:flex;gap:7px;align-items:center}.scheme-scale input{width:90px;padding:4px}.scheme-navigation{display:flex;gap:4px;flex-wrap:wrap;margin:5px 0}.scheme-navigation button{padding:4px 7px;font-size:11px}#schemePreview svg{touch-action:none;cursor:grab}#schemePreview svg:active{cursor:grabbing}
+
+#geometryHandles{position:absolute;inset:0;width:100%;height:100%;z-index:5;pointer-events:none;overflow:hidden}.geometry-edge{fill:none;stroke:transparent;stroke-width:14;pointer-events:stroke;cursor:copy}.geometry-midpoint{fill:#a8d1bc;stroke:#fff;stroke-width:1;pointer-events:all;cursor:copy}.geometry-vertex{fill:#fff;stroke:#175740;stroke-width:2;pointer-events:all;cursor:grab}.geometry-vertex:active{cursor:grabbing}#schemePreview{overscroll-behavior:contain}
 </style>
 </head>
 <body>
@@ -171,6 +173,7 @@ html,body,#workspace{width:100%;height:100%;overflow:hidden}
     <svg id="naturalHit" aria-hidden="true"></svg>
     <div id="naturalTooltip" class="natural-tooltip" hidden></div>
     <svg id="spatial" aria-label="Пространственные объекты"></svg>
+    <svg id="geometryHandles" aria-label="Редактирование геометрии"></svg>
     <div id="labels" class="map-labels" aria-hidden="true"></div>
     <div id="markers" class="markers"></div>
   </div>
