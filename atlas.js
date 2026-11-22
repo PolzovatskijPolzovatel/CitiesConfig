@@ -514,7 +514,6 @@ function setupNaturalPicker(item){
      const button=document.createElement('button');
      button.type='button';button.textContent=title+' ×';button.title='Убрать связь';
      button.onclick=toggle;chips.append(button);
-     if(object){const edit=document.createElement('button');edit.type='button';edit.textContent='Изменить';edit.setAttribute('aria-label','Изменить · '+title);edit.onclick=()=>selectItem(object.id);chips.append(edit);}
      const full=object&&fullRiverFor(object);
      if(full&&full.id!==object.id){
        const expand=document.createElement('button');expand.type='button';expand.textContent='Целиком';expand.setAttribute('aria-label','Показать целиком · '+title);
@@ -1668,21 +1667,23 @@ function customDiagram(item){
  return image?'<figure class="scheme custom-scheme"><img src="'+image+'" alt="Схема · '+esc(item.title)+'"></figure>':'';
 }
 function displayDiagram(item){
- return customDiagram(item)||((item.schemeAuto||item.schemePanX||item.schemePanY||item.schemeZoom&&item.schemeZoom!==1||item.peers?.length||item.excluded?.length||item.natural?.length||item.related?.length)?relatedDiagram(item):(scheme(item)||relatedDiagram(item)));
+ return customDiagram(item)||(!item.schemeAuto&&scheme(item)||relatedDiagram(item));
 }
 function setupSchemeEditor(item){
  const form=$('editorForm'),panel=$('schemeControls');
  let image=validCustomScheme(item.customScheme);
  let panX=finiteSchemeNumber(item.schemePanX),panY=finiteSchemeNumber(item.schemePanY),automatic=Boolean(item.schemeAuto);
- panel.innerHTML='<label class="scheme-scale">Масштаб схемы<input id="schemeZoom" type="number" min="0.01" step="any" value="'+Number(((item.schemeZoom||1)*100).toPrecision(8))+'" aria-label="Масштаб схемы"><output id="schemeZoomValue">%</output></label><div id="schemePreview"></div><div class="scheme-navigation"><button type="button" id="schemeSmaller" aria-label="Уменьшить схему">−</button><button type="button" id="schemeLarger" aria-label="Увеличить схему">+</button><button type="button" id="schemeCenter">Центр города</button><button type="button" id="schemeFit">Вписать</button></div><div class="scheme-upload"><button type="button" id="uploadScheme">Загрузить свою схему</button><input id="schemeFile" type="file" accept="image/png,image/jpeg,image/webp,image/svg+xml,.svg" hidden><button type="button" id="resetScheme">Автоматическая схема</button></div>';
+ panel.innerHTML='<label class="scheme-scale">Масштаб схемы<input id="schemeZoom" type="number" min="0.01" step="any" value="'+Number(((item.schemeZoom||1)*100).toPrecision(8))+'" aria-label="Масштаб схемы"><output id="schemeZoomValue">%</output></label><div id="schemePreview"></div><div class="scheme-navigation"><button type="button" id="schemeSmaller" aria-label="Уменьшить схему">−</button><button type="button" id="schemeLarger" aria-label="Увеличить схему">+</button><button type="button" id="schemeCenter">Центр города</button><button type="button" id="schemeFit">Вписать</button></div><div class="scheme-upload"><button type="button" id="uploadScheme">Загрузить свою схему</button><input id="schemeFile" type="file" accept="image/png,image/jpeg,image/webp,image/svg+xml,.svg" hidden><button type="button" id="resetScheme">Автоматическая схема</button><button type="button" id="restoreBuiltinScheme">Исходная схема</button></div>';
  const slider=$('schemeZoom');
+ const fixedScheme=()=>Boolean(image||SCHEME[item.id]&&!automatic);
  form.readSchemeZoom=()=>positiveSchemeZoom(Number(slider.value)/100);
  form.readSchemeView=()=>({schemePanX:panX,schemePanY:panY,schemeAuto:automatic});
  form.readCustomScheme=()=>image;
  form.renderSchemePreview=()=>{
    $('schemeZoomValue').textContent='%';
-   slider.disabled=Boolean(image);$('resetScheme').hidden=!image;
-   for(const button of panel.querySelectorAll('.scheme-navigation button'))button.disabled=Boolean(image);
+   slider.disabled=fixedScheme();$('resetScheme').hidden=!fixedScheme();
+   $('restoreBuiltinScheme').hidden=!SCHEME[item.id]||!automatic&&!image;
+   for(const button of panel.querySelectorAll('.scheme-navigation button'))button.disabled=fixedScheme();
    const state=form.readRelations?.()||item;
    const draft={...item,...state,schemeZoom:form.readSchemeZoom(),schemePanX:panX,schemePanY:panY,schemeAuto:automatic,customScheme:image};
    $('schemePreview').innerHTML=displayDiagram(draft);
@@ -1690,6 +1691,7 @@ function setupSchemeEditor(item){
  slider.oninput=()=>{automatic=true;dirty=true;form.renderSchemePreview();};
  $('uploadScheme').onclick=()=>$('schemeFile').click();
  $('resetScheme').onclick=()=>{image='';automatic=true;dirty=true;form.renderSchemePreview();};
+ $('restoreBuiltinScheme').onclick=()=>{image='';automatic=false;panX=0;panY=0;slider.value='100';dirty=true;form.renderSchemePreview();};
  $('schemeFile').onchange=async event=>{
    const file=event.target.files[0];if(!file)return;
    const mime=file.type||(/\.svg$/i.test(file.name)?'image/svg+xml':'');
@@ -1704,7 +1706,7 @@ function setupSchemeEditor(item){
  };
  const preview=$('schemePreview');
  function zoom(factor,x=155,y=61){
-   if(image)return;
+   if(fixedScheme())return;
    const old=form.readSchemeZoom(),next=positiveSchemeZoom(old*factor),ratio=next/old;
    panX=x-155-(x-155-panX)*ratio;panY=y-61-(y-61-panY)*ratio;
    slider.value=String(Number((next*100).toPrecision(8)));automatic=true;dirty=true;form.renderSchemePreview();
@@ -1718,13 +1720,13 @@ function setupSchemeEditor(item){
  };
  preview.addEventListener('wheel',event=>{
    event.preventDefault();event.stopPropagation();
-   const svg=preview.querySelector('svg');if(image||!svg)return;
+   const svg=preview.querySelector('svg');if(fixedScheme()||!svg)return;
    const rect=svg.getBoundingClientRect();
    zoom(Math.exp(-clamp(event.deltaY,-150,150)*.003),(event.clientX-rect.left)*310/rect.width,(event.clientY-rect.top)*122/rect.height);
  },{passive:false});
  let drag=null;
  preview.addEventListener('pointerdown',event=>{
-   const svg=preview.querySelector('svg');if(image||!svg||!svg.contains(event.target)||event.button!==0)return;
+   const svg=preview.querySelector('svg');if(fixedScheme()||!svg||!svg.contains(event.target)||event.button!==0)return;
    const rect=svg.getBoundingClientRect();drag={id:event.pointerId,x:event.clientX,y:event.clientY,panX,panY,width:rect.width,height:rect.height};
    preview.setPointerCapture(event.pointerId);event.preventDefault();
  });
@@ -2240,7 +2242,7 @@ function renderEditor(item){
 function commit(notify=false){
  const item=chosen(), input=$('itemTitle');
  if(!item||!input)return false;
- const replacement={...item,...(editPoint||{}),type:$('itemType').value,...($('editorForm').readConfigurations?.()||{}),schemeZoom:$('editorForm').readSchemeZoom?.()||item.schemeZoom||1,...($('editorForm').readSchemeView?.()||{}),customScheme:$('editorForm').readCustomScheme?.()||'',title:input.value.trim()||TYPES[$('itemType').value].name,...($('editorForm').readRelations?.()||{}),place:$('itemPlace').value.trim(),...(item.geometry?{geometry:item.geometry.type==='Point'&&editPoint?{type:'Point',coordinates:[editPoint.lon,editPoint.lat]}:item.geometry,links:$('editorForm').readLinks?.()||item.links||[]}:{}),article:cleanHTML($('editorText').innerHTML)};
+ const replacement={...item,...(editPoint||{}),type:$('itemType').value,...($('editorForm').readConfigurations?.()||{}),schemeZoom:$('editorForm').readSchemeZoom?.()||item.schemeZoom||1,...($('editorForm').readSchemeView?.()||{}),customScheme:$('editorForm').readCustomScheme?.()??item.customScheme??'',title:input.value.trim()||TYPES[$('itemType').value].name,...($('editorForm').readRelations?.()||{}),place:$('itemPlace').value.trim(),...(item.geometry?{geometry:item.geometry.type==='Point'&&editPoint?{type:'Point',coordinates:[editPoint.lon,editPoint.lat]}:item.geometry,links:$('editorForm').readLinks?.()||item.links||[]}:{}),article:cleanHTML($('editorText').innerHTML)};
  if(replacement.type==='lake'&&replacement.geometry){
    try{replacement.geometry=waterArea(replacement.geometry);}catch{toast('Для водного объекта нужны хотя бы три вершины');return false;}
  }
