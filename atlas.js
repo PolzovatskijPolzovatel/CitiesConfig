@@ -276,7 +276,7 @@ function queueViewportGeo(viewBox,k){
 }
 function requestViewportBathymetry(viewBox,k){
  if(!bathyBuilt&&!bathyLoading){
-  bathyLoading=requestGeo('bathy-overview',true).then(data=>{buildBathymetry(data);bathyBuilt=true;refresh();}).catch(()=>{bathyLoading=null;toast('Не удалось загрузить батиметрию. Повторите включение слоя.');});
+  bathyLoading=requestGeo('bathy-overview-fast',true).then(data=>{buildBathymetry(data);bathyBuilt=true;refresh();}).catch(()=>{bathyLoading=null;toast('Не удалось загрузить батиметрию. Повторите включение слоя.');});
  }
  if(k<12)return;
  for(const tile of GEO_MANIFEST.bathy){
