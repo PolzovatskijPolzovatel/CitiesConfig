@@ -2020,8 +2020,9 @@ function draw(){
  basemap.setAttribute('viewBox',viewBox);
  drawNaturalLayer(viewBox,k);
  const taken=[];
- for(const {el,item} of markerEls){
-   const [x,y]=point(item.lon,item.lat);
+ for(const record of markerEls){
+   const {el,item}=record;
+   const [x,y]=point(item.lon,item.lat);record.x=x;record.y=y;
    el.style.left=x+'px';el.style.top=y+'px';el.hidden=x<-20||x>w+20||y<-20||y>h+20;
    if(!el.hidden)taken.push([x-5,y-5,x+5,y+5]);
  }
@@ -2103,6 +2104,7 @@ function renderFilter(){
  filter.value=typeFilter;
 }
 function renderItems(){
+ clearCityProximity();hideCityChooser();
  renderFilter();
  const visible=visibleItems();
  markerEls=visible.filter(item=>!item.geometry||item.geometry.type==='Point').map(item=>{
@@ -2148,26 +2150,33 @@ $('layers').onclick=e=>{
 $('typeSelect').onchange=e=>{typeFilter=e.target.value;applyFilter();};
 function closeDetail(){
  if(mode==='edit'&&dirty)commit();
+ detail.classList.remove('sheet-expanded');
  selected=null;moving=false;editPoint=null;render();
 }
 function selectItem(id){
  if(id===selected)return;
  if(mode==='edit'&&dirty)commit();
  if(mode==='edit'&&!openObjectEditor(id))return;
+ detail.classList.remove('sheet-expanded');
  selected=id;activeTool=null;moving=false;editPoint=null;dirty=false;render();
 }
 function renderDetail(){
  setNaturalPicking(false);
  const item=chosen();dirty=false;editPoint=null;editorRange=null;
  detail.hidden=!item||Boolean(drawing);
+ $('workspace').classList.toggle('detail-open',!detail.hidden);
+ $('workspace').classList.toggle('editing',mode==='edit');
  if(detail.hidden){
    detail.replaceChildren();return;
  }
  if(mode==='edit'){if(openObjectEditor(item.id))renderEditor(chosen());return;}
  const type=TYPES[item.type];
  const refs=[...(item.source||[]),...(MARINE_SOURCES[item.id]?[MARINE_SOURCES[item.id]]:[])].map(([name,url])=>'<a href="'+esc(url)+'" target="_blank" rel="noopener noreferrer">'+esc(name)+'</a>').join(' · ');
- detail.innerHTML='<article class="detail-inner"><div class="detail-top"><div class="detail-type" '+tone(item.type)+'><span class="detail-symbol">'+glyph(item.type)+'</span>'+type.name+'</div><button id="closeItem" class="detail-close" aria-label="Закрыть" title="Закрыть">'+icon('close')+'</button></div><h2>'+esc(item.title)+'</h2><div class="subline">'+icon('pin')+(item.place?esc(item.place)+'<span class="divider">·</span>':'')+'<span class="coordinates">'+coord(item)+'</span></div>'+(item.lesson?'<div class="lecture-reference"><span>Лекция '+item.lesson+' · пример '+esc(item.number)+'</span><small>Печатное издание 2006 г., с. '+esc(item.pages)+'</small></div>':'')+displayDiagram(item)+articleSections(item)+(refs?'<p class="article-source">Для справки: '+refs+'</p>':'')+'</article>';
+ detail.innerHTML='<article class="detail-inner"><div class="detail-top"><button id="expandSheet" class="sheet-toggle" aria-label="Развернуть описание" aria-expanded="false"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3H3v5m13 13h5v-5M3 3l7 7m11 11-7-7" fill="none" stroke="currentColor" stroke-width="1.6"/></svg></button><div class="detail-type" '+tone(item.type)+'><span class="detail-symbol">'+glyph(item.type)+'</span>'+type.name+'</div><button id="closeItem" class="detail-close" aria-label="Закрыть" title="Закрыть">'+icon('close')+'</button></div><h2>'+esc(item.title)+'</h2><div class="subline">'+icon('pin')+(item.place?esc(item.place)+'<span class="divider">·</span>':'')+'<span class="coordinates">'+coord(item)+'</span></div>'+(item.lesson?'<div class="lecture-reference"><span>Лекция '+item.lesson+' · пример '+esc(item.number)+'</span><small>Печатное издание 2006 г., с. '+esc(item.pages)+'</small></div>':'')+displayDiagram(item)+articleSections(item)+(refs?'<p class="article-source">Для справки: '+refs+'</p>':'')+'</article>';
  $('closeItem').onclick=closeDetail;
+ const expand=$('expandSheet');
+ const updateExpansion=()=>{const expanded=detail.classList.contains('sheet-expanded');expand.setAttribute('aria-expanded',String(expanded));expand.setAttribute('aria-label',expanded?'Свернуть описание':'Развернуть описание');};
+ updateExpansion();expand.onclick=()=>{detail.classList.toggle('sheet-expanded');updateExpansion();};
 }
 function toolButton(label,title,content,command){return '<button type="button" aria-label="'+title+'" title="'+title+'" data-command="'+command+'">'+(content||label)+'</button>';}
 
@@ -2379,6 +2388,51 @@ $('insertForm').onsubmit=async e=>{
  else document.execCommand('createLink',false,url);
  dirty=true;
 };
+// Proximity updates touch only marker styles; map layers are not redrawn.
+let cityProximityFrame=0,cityProximityPosition=null;
+function clearCityProximity(){
+ cityProximityPosition=null;
+ for(const {el} of markerEls){el.style.setProperty('--city-scale','1');el.classList.remove('proximity-focus');}
+}
+function updateCityProximity(){
+ cityProximityFrame=0;
+ if(!cityProximityPosition||pointer||drawing||naturalPicking)return;
+ const {x,y}=cityProximityPosition;let nearest=null,best=Infinity;
+ for(const record of markerEls){
+   const distance=record.el.hidden?Infinity:Math.hypot(record.x-x,record.y-y);
+   record.el.style.setProperty('--city-scale',String(1+1.4*Math.max(0,1-distance/64)**2));
+   record.el.classList.remove('proximity-focus');
+   if(distance<best){best=distance;nearest=record;}
+ }
+ if(best<24)nearest.el.classList.add('proximity-focus');
+}
+function cityTapCandidates(x,y,radius=28){
+ return markerEls.filter(record=>!record.el.hidden&&Math.hypot(record.x-x,record.y-y)<=radius)
+   .sort((a,b)=>Math.hypot(a.x-x,a.y-y)-Math.hypot(b.x-x,b.y-y));
+}
+function hideCityChooser(){ const chooser=$('cityChooser');if(chooser)chooser.hidden=true; }
+function showCityChooser(candidates){
+ let chooser=$('cityChooser');
+ if(!chooser){chooser=document.createElement('div');chooser.id='cityChooser';chooser.className='city-chooser popover';chooser.setAttribute('aria-label','Выберите город');$('workspace').append(chooser);}
+ chooser.replaceChildren();
+ const close=document.createElement('button');close.className='chooser-close';close.setAttribute('aria-label','Закрыть выбор города');close.innerHTML=icon('close');close.onclick=hideCityChooser;chooser.append(close);
+ for(const {item} of candidates){
+   const button=document.createElement('button');button.className='city-choice';button.textContent=item.title+' — '+configurationTypes(item).map(type=>TYPES[type].name).join(', ');
+   button.onclick=()=>{hideCityChooser();selectItem(item.id);};chooser.append(button);
+ }
+ chooser.hidden=false;
+}
+function selectCityAtTouch(x,y){
+ const candidates=cityTapCandidates(x,y);hideCityChooser();
+ if(!candidates.length)return;
+ if(candidates.length===1){selectItem(candidates[0].item.id);return;}
+ const xs=candidates.map(record=>record.x),ys=candidates.map(record=>record.y);
+ const spread=Math.hypot(Math.max(...xs)-Math.min(...xs),Math.max(...ys)-Math.min(...ys));
+ // Coincident cities cannot be separated by zooming, so offer names instead.
+ if(spread<1||vis.zoom>=719){showCityChooser(candidates);return;}
+ const cx=(Math.min(...xs)+Math.max(...xs))/2,cy=(Math.min(...ys)+Math.max(...ys))/2;
+ const pos=unpoint(cx,cy);if(selected)closeDetail();vis.lon=pos.lon;vis.y=py(pos.lat);vis.zoom=Math.min(720,vis.zoom*2.5);refresh();
+}
 function onControl(el){return !!el.closest('button,a,.popover,[data-feature]');}
 const touchPointers=new Map();
 let pinchGesture=null;
@@ -2417,7 +2471,8 @@ map.addEventListener('click',e=>{
  if(Date.now()<suppressMapClickUntil){e.preventDefault();e.stopImmediatePropagation();}
 },true);
 map.addEventListener('pointerdown',e=>{
- if(e.button!==0||onControl(e.target))return;
+ if(e.button!==0||(onControl(e.target)&&!(mode==='view'&&e.pointerType==='touch'&&e.target.closest('.marker'))))return;
+ clearCityProximity();hideCityChooser();
  if(e.pointerType==='touch'){
    touchPointers.set(e.pointerId,{x:e.clientX,y:e.clientY});
    map.setPointerCapture(e.pointerId);
@@ -2428,6 +2483,7 @@ map.addEventListener('pointerdown',e=>{
  map.setPointerCapture(e.pointerId); map.classList.add('grabbing');
 });
 map.addEventListener('pointermove',e=>{
+ if(e.pointerType==='mouse'&&!pointer&&!drawing&&!naturalPicking){const rect=map.getBoundingClientRect();cityProximityPosition={x:e.clientX-rect.left,y:e.clientY-rect.top};if(!cityProximityFrame)cityProximityFrame=requestAnimationFrame(updateCityProximity);}
  if(touchPointers.has(e.pointerId)){
    touchPointers.set(e.pointerId,{x:e.clientX,y:e.clientY});
    if(pinchGesture){movePinch();return;}
@@ -2447,7 +2503,9 @@ map.addEventListener('pointerup',e=>{
  if(endTouch(e))return;
  if(pointer?.id!==e.pointerId)return;
  const wasDrag=pointer.dragged;pointer=null;map.classList.remove('grabbing');
- if(wasDrag||mode!=='edit')return;
+ if(e.pointerType==='touch')suppressMapClickUntil=Date.now()+600;
+ if(wasDrag)return;
+ if(mode!=='edit'){if(e.pointerType==='touch'){const rect=map.getBoundingClientRect();selectCityAtTouch(e.clientX-rect.left,e.clientY-rect.top);}return;}
  const rect=map.getBoundingClientRect();
  if(naturalPicking){
    linkNaturalAt(e.clientX-rect.left,e.clientY-rect.top,e.pointerType==='touch'?14:8,e.altKey);
@@ -2467,7 +2525,7 @@ map.addEventListener('contextmenu',event=>{
  if(!drawing.editing&&drawing.points.length<(drawing.area?3:2)){toast(drawing.area?'Укажите минимум три вершины':'Укажите минимум две вершины');return;}
  finishDrawing();
 });
-map.addEventListener('pointerleave',clearNaturalHover);
+map.addEventListener('pointerleave',()=>{clearNaturalHover();clearCityProximity();});
 function cancelMapPointer(e){
  if(endTouch(e))return;
  if(pointer?.id===e.pointerId){pointer=null;map.classList.remove('grabbing');}
