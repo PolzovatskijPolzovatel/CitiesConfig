@@ -1,19 +1,9 @@
-const response = await fetch('https://raw.githubusercontent.com/PolzovatskijPolzovatel/CitiesConfig/ebb6f55e48e2848ec83976c1a6e424ad35ddd263/index.html');
-if (!response.ok) throw new Error('Не удалось загрузить карту');
-const source = await response.text();
-function readNaturalEarth(name) {
-  const prefix = `const ${name}=`;
-  const start = source.indexOf(prefix) + prefix.length;
-  if (start < prefix.length) throw new Error(`Не найдены геоданные ${name}`);
-  const newline = source.indexOf('\n', start);
-  const scriptEnd = source.indexOf('</script>', start);
-  const end = newline === -1 ? scriptEnd : Math.min(newline, scriptEnd);
-  return JSON.parse(source.slice(start, end).trimEnd().slice(0, -1));
-}
-const GEODATA = readNaturalEarth('GEODATA');
-const WATER_DATA = readNaturalEarth('WATER_DATA');
-const BATHYMETRY_PACKED = readNaturalEarth('BATHYMETRY_PACKED');
-const WATER_MATCHES = readNaturalEarth('WATER_MATCHES');
+const GEO_BASE='https://citiesconfig-sync.polzovatelskij.chatgpt.site/geodata/ne-v1/';
+const response=await fetch(GEO_BASE+'core');
+if(!response.ok)throw Error('Не удалось загрузить основу карты');
+const core=await response.json();
+const GEODATA=core.GEODATA,WATER_DATA=core.WATER_DATA,WATER_MATCHES=core.WATER_MATCHES,GEO_MANIFEST=core.manifest;
+const BATHYMETRY_PACKED='';
 
 const TYPES={
  y:{name:'Y-образная',short:'Y-образная',tone:'#28654f',soft:'#dceadf',glyph:'<path d="M5 5l7 7 7-7M12 12v7"/><circle cx="12" cy="12" r="1.8" fill="currentColor" stroke="none"/>'},
@@ -220,6 +210,104 @@ for(const city of STARTERS){
 }
 
 ;
+const progressiveData=typeof GEO_MANIFEST!=='undefined';
+let naturalDataVersion=0,geoQueue=[],geoActive=0,geoViewportTimer=null;
+const geoRequests=new Map(),geoLoaded=new Set(),bathyTileData=new Map(),bathyTileNodes=new Map();
+function requestGeo(name,priority=false){
+ if(geoRequests.has(name))return geoRequests.get(name);
+ const task=new Promise((resolve,reject)=>{const job={name,resolve,reject};priority?geoQueue.unshift(job):geoQueue.push(job);pumpGeo();});
+ geoRequests.set(name,task);return task;
+}
+function pumpGeo(){
+ while(geoActive<3&&geoQueue.length){
+  const job=geoQueue.shift();geoActive++;
+  fetch(GEO_BASE+job.name,{signal:AbortSignal.timeout(25000)}).then(response=>{if(!response.ok)throw Error('geo');return response.json();})
+   .then(data=>{geoLoaded.add(job.name);job.resolve(data);}).catch(error=>{geoRequests.delete(job.name);job.reject(error);}).finally(()=>{geoActive--;pumpGeo();});
+ }
+}
+function geoIntersects(bounds,viewBox,margin=0){
+ const [x,y,w,h]=viewBox.split(' ').map(Number);
+ return naturalProject(bounds[3])<=y+h+margin&&naturalProject(bounds[1])>=y-margin&&[-360,0,360].some(offset=>bounds[2]+offset>=x-margin&&bounds[0]+offset<=x+w+margin);
+}
+async function loadWaterChunk(name){
+ const rows=await requestGeo(name,true);let changed=false;
+ for(const [index,geometry] of rows){const feature=WATER_LIBRARY[index];if(feature.loaded)continue;feature.geometry=expandGeometry(geometry);feature.loaded=true;naturalHitCache.delete(feature);const full=FULL_RIVER_BY_PART.get(feature.id);if(full)naturalHitCache.delete(full);changed=true;}
+ if(changed){
+  naturalDataVersion++;spatialRevision++;
+  for(const bin of naturalBins.values())if(bin.features.some(feature=>feature.chunk===name))bin.path=null;
+  for(const [key,entry] of visibleNaturalBins)if(entry.bin.features.some(feature=>feature.chunk===name)){entry.path.remove();visibleNaturalBins.delete(key);}
+  refresh();
+ }
+}
+function missingNaturalChunks(item){
+ if(!progressiveData||!item)return [];
+ const ids=[...(item.natural||[]),...(item.related||[]),...(NATURAL_BY_ID.has(item.id)?[item.id]:[])];
+ const names=new Set();
+ for(const id of ids){const feature=NATURAL_BY_ID.get(id);if(!feature)continue;for(const part of feature.parts||[id]){const source=NATURAL_BY_ID.get(part);if(source?.chunk&&!source.loaded)names.add(source.chunk);}}
+ // The inherited Lake Superior uses the same catalogue object.
+ if(inheritedShapes(item).some(shape=>shape.title==='Верхнее озеро')){const lake=WATER_LIBRARY.find(f=>f.title==='Верхнее озеро');if(lake?.chunk&&!lake.loaded)names.add(lake.chunk);}
+ return [...names];
+}
+async function ensureNaturalData(item){await Promise.all(missingNaturalChunks(item).map(loadWaterChunk));}
+
+let editorDataPromise=null;
+async function ensureAllEditorData(){
+ if(!progressiveData)return;
+ if(!editorDataPromise)editorDataPromise=Promise.all(GEO_MANIFEST.water.map(row=>loadWaterChunk(row.name))).catch(error=>{editorDataPromise=null;throw error;});
+ await editorDataPromise;
+}
+function queueViewportGeo(viewBox,k){
+ if(!progressiveData)return;
+ clearTimeout(geoViewportTimer);
+ geoViewportTimer=setTimeout(()=>{
+  if(k>=12){
+   if(showWater||naturalPicking)for(const row of GEO_MANIFEST.water){if(geoLoaded.has(row.name)||!geoIntersects(row.bounds,viewBox,3)||row.detail&&k<20)continue;loadWaterChunk(row.name).catch(()=>{});}
+   for(const row of GEO_MANIFEST.coast){if(geoLoaded.has(row.name)||!geoIntersects(row.bounds,viewBox))continue;
+    requestGeo(row.name).then(rows=>{for(const [index,d] of rows){GEODATA[index]=d;$('countryPaths')?.children[index]?.setAttribute('d',d);}refresh();}).catch(()=>{});
+   }
+  }
+  if(showBathymetry)requestViewportBathymetry(viewBox,k);
+ },180);
+}
+function requestViewportBathymetry(viewBox,k){
+ if(!bathyBuilt&&!bathyLoading){
+  bathyLoading=requestGeo('bathy-overview',true).then(data=>{buildBathymetry(data);bathyBuilt=true;refresh();}).catch(()=>{bathyLoading=null;toast('Не удалось загрузить батиметрию. Повторите включение слоя.');});
+ }
+ if(k<12)return;
+ for(const tile of GEO_MANIFEST.bathy){
+  if(!geoIntersects(tile.bounds,viewBox,2)||bathyTileData.has(tile.name))continue;
+  requestGeo(tile.name).then(data=>{
+   bathyTileData.set(tile.name,data);
+   // Keep only a bounded number of detailed ocean tiles in memory.
+   while(bathyTileData.size>16){const oldest=bathyTileData.keys().next().value;bathyTileData.delete(oldest);geoRequests.delete(oldest);geoLoaded.delete(oldest);for(const [key,node] of bathyTileNodes)if(key.startsWith(oldest+':')){node.remove();bathyTileNodes.delete(key);}}
+   refresh();
+  }).catch(()=>{});
+ }
+}
+function drawDetailedBathymetry(viewBox,k){
+ if(!progressiveData)return;
+ const shown=new Set();
+ if(showBathymetry&&k>=12)for(const tile of GEO_MANIFEST.bathy){
+  const rows=bathyTileData.get(tile.name);if(!rows||!geoIntersects(tile.bounds,viewBox))continue;
+  for(const offset of [-360,0,360]){
+   const b=[tile.bounds[0]+offset,tile.bounds[1],tile.bounds[2]+offset,tile.bounds[3]];
+   const [left,top,width,height]=viewBox.split(' ').map(Number);if(b[2]<left||b[0]>left+width)continue;
+   const key=tile.name+':'+offset;shown.add(key);if(bathyTileNodes.has(key))continue;
+   const group=svgNode('g',{transform:'translate('+offset+' 0)'});
+   const grouped=new Map();for(const [depth,geometry] of rows){if(!grouped.has(depth))grouped.set(depth,[]);grouped.get(depth).push(projectedPath(expandGeometry(geometry)));}
+   for(const [depth,paths] of [...grouped].sort((a,b)=>a[0]-b[0]))group.append(svgNode('path',{d:paths.join(' '),fill:bathymetryColor(depth),'fill-rule':'nonzero'}));
+   $('bathymetry').append(group);bathyTileNodes.set(key,group);
+  }
+ }
+ for(const [key,node] of bathyTileNodes)if(!shown.has(key)){node.remove();bathyTileNodes.delete(key);}
+}
+function bathymetryColor(depth){
+ const colors=['#c1dce5','#a9cadc','#95bbd3','#83acc9','#749fc0','#658fb5','#577fa7','#4b7099','#405f89','#38577d','#304d70','#294366'];
+ const depths=progressiveData?GEO_MANIFEST.depths:[0,200,1000,2000,3000,4000,5000,6000,7000,8000,9000,10000];
+ return colors[Math.min(colors.length-1,Math.max(0,depths.indexOf(depth)))];
+}
+
+;
 // Generalized axes of mountain ranges. They describe extent, not administrative boundaries.
 const MOUNTAIN_ROWS=[
  ['Альпы','5.8,44.2 6.6,45.4 8.2,46.2 9.9,46.5 11.7,46.8 13.6,47.1 15.3,47.4'],
@@ -280,8 +368,8 @@ const MOUNTAIN_ROWS=[
 ];
 
 function expandGeometry([type,coordinates]){return {type,coordinates};}
-const WATER_LIBRARY=WATER_DATA.map(([kind,detail,rank,title,geometry,bounds],index)=>({
- id:'water-'+index,kind,detail,rank,title,bounds,type:kind==='river'?'river':'lake',geometry:expandGeometry(geometry)
+const WATER_LIBRARY=WATER_DATA.map(([kind,detail,rank,title,geometry,bounds,chunk],index)=>({
+ id:'water-'+index,kind,detail,rank,title:title||(kind==='river'?'Река без названия':'Водный объект без названия')+' · '+index,unnamed:!title,bounds,chunk,loaded:!chunk,type:kind==='river'?'river':'lake',geometry:expandGeometry(geometry)
 }));
 const MOUNTAIN_LIBRARY=MOUNTAIN_ROWS.map(([title,trace],index)=>({
  id:'mountain-'+index,kind:'mountain',title,type:'barrier',
@@ -289,7 +377,7 @@ const MOUNTAIN_LIBRARY=MOUNTAIN_ROWS.map(([title,trace],index)=>({
 }));
 function buildFullRivers(){
  const byName=new Map();
- for(const feature of WATER_LIBRARY.filter(object=>object.kind==='river'&&object.title)){
+ for(const feature of WATER_LIBRARY.filter(object=>object.kind==='river'&&object.title&&!object.unnamed)){
    if(!byName.has(feature.title))byName.set(feature.title,[]);
    byName.get(feature.title).push(feature);
  }
@@ -305,7 +393,7 @@ function buildFullRivers(){
    for(const group of groups){
      const first=group.parts.reduce((best,part)=>Number(part.id.slice(6))<Number(best.id.slice(6))?part:best);
      full.push({id:'river-full-'+first.id.slice(6),kind:'river',type:'river',title,bounds:group.bounds,fullRiver:true,
-       parts:group.parts.map(part=>part.id),geometry:{type:'MultiLineString',coordinates:group.parts.flatMap(part=>part.geometry.type==='LineString'?[part.geometry.coordinates]:part.geometry.coordinates)}});
+       parts:group.parts.map(part=>part.id),get geometry(){if(this._version!==naturalDataVersion){this._version=naturalDataVersion;this._geometry={type:'MultiLineString',coordinates:group.parts.flatMap(part=>part.geometry.type==='LineString'?(part.geometry.coordinates.length?[part.geometry.coordinates]:[]):part.geometry.coordinates)};}return this._geometry;}});
    }
  }
  return full;
@@ -321,7 +409,7 @@ function fullRiverFor(feature){
  const bounds=coordinatesBounds(geometryParts(feature.geometry).flatMap(part=>part.paths?.flat()||[part.point]));
  return matches.find(river=>bounds[0]<=river.bounds[2]&&bounds[2]>=river.bounds[0]&&bounds[1]<=river.bounds[3]&&bounds[3]>=river.bounds[1])||null;
 }
-const NATURAL_LIBRARY=[...MOUNTAIN_LIBRARY,...WATER_LIBRARY.filter(feature=>feature.title&&feature.kind!=='river'),...FULL_RIVERS];
+const NATURAL_LIBRARY=[...MOUNTAIN_LIBRARY,...WATER_LIBRARY.filter(feature=>feature.title&&(feature.kind!=='river'||feature.unnamed)),...FULL_RIVERS];
 const NATURAL_BY_ID=new Map([...WATER_LIBRARY.filter(feature=>feature.title),...NATURAL_LIBRARY].map(feature=>[feature.id,feature]));
 const catalogNames={river:'Река / русло',lake:'Озеро',historic:'Историческое озеро',pluvial:'Палеоозеро',playa:'Сухое озеро',mountain:'Горный хребет'};
 let showWater=true,showMountains=true;
@@ -367,6 +455,7 @@ function buildNaturalLayer(){
 }
 
 function prepareBathymetry(){
+ if(progressiveData)return;
  if(bathyBuilt||bathyLoading||!BATHYMETRY_PACKED)return;
  bathyLoading=loadBathymetry().then(data=>{
    buildBathymetry(data);
@@ -393,7 +482,7 @@ function buildBathymetry(data){
    grouped.get(depth).push(projectedPath(expandGeometry(geometry)));
  }
  for(const [index,[depth,paths]] of [...grouped].sort((a,b)=>a[0]-b[0]).entries()){
-   scene.append(svgNode('path',{d:paths.join(' '),fill:colors[Math.min(colors.length-1,index)],'fill-rule':'nonzero','data-depth':depth}));
+   scene.append(svgNode('path',{d:paths.join(' '),fill:bathymetryColor(depth),'fill-rule':'nonzero','data-depth':depth}));
  }
  defs.append(scene);svg.append(defs);
  for(const offset of [-360,0,360])svg.append(svgNode('use',{href:'#bathymetryScene',x:offset}));
@@ -402,6 +491,7 @@ function buildBathymetry(data){
 function bathyVisibleMask(kind){return kind==='river'&&!showWater&&naturalPicking;}
 
 function drawNaturalLayer(viewBox,k){
+ queueViewportGeo(viewBox,k);drawDetailedBathymetry(viewBox,k);
  const hiddenObjects=naturalOverrideIds();
  const signature=[...hiddenObjects].sort().join(',');
  if(signature!==naturalOverrideSignature){
@@ -455,16 +545,17 @@ function setupNaturalPicker(item){
  const panel=$('naturalControls');
  const form=$('editorForm');
  const state={natural:[...(item.natural||[])],excluded:[...(item.excluded||[])],related:[...(item.related||[])],peers:[...(item.peers||[])]};
- panel.innerHTML='<label class="link-picker">Связи<input id="naturalQuery" type="search" placeholder="Название реки, озера или хребта"></label><button type="button" id="naturalMapPick" aria-pressed="false" title="Щелчок добавляет или убирает связь. Alt показывает реку под озером.">Выбрать на карте</button><select id="naturalKind" aria-label="Вид природного объекта"><option value="all">Все</option><option value="mountain">Горные хребты</option><option value="river">Реки</option><option value="lake">Озёра</option><option value="older">Исторические и сухие озёра</option></select><div id="naturalResults" class="natural-results" hidden></div><div id="naturalChips" class="linked-cities"></div>';
+ panel.innerHTML='<label class="link-picker">Связи<input id="naturalQuery" type="search" placeholder="Название реки, озера, города или хребта"></label><button type="button" id="naturalMapPick" aria-pressed="false" title="Щелчок добавляет или убирает связь. Alt показывает реку под озером.">Выбрать на карте</button><select id="naturalKind" aria-label="Вид объекта"><option value="all">Все</option><option value="mountain">Горные хребты</option><option value="river">Реки</option><option value="city">Города</option><option value="lake">Озёра</option><option value="older">Исторические и сухие озёра</option></select><div id="naturalResults" class="natural-results" hidden></div><div id="naturalChips" class="linked-cities"></div>';
  const query=$('naturalQuery'),kind=$('naturalKind'),results=$('naturalResults'),chips=$('naturalChips');
  form.readNatural=()=>state.natural;
  form.readRelations=()=>state;
  function changed(){
-   dirty=true;
+   dirty=true;queueEditorCheckpoint();spatialRevision++;
    renderChips();renderResults();renderSpatial();form.renderSchemePreview?.();
  }
- form.addNatural=id=>{
+ form.addNatural=async id=>{
    const full=FULL_RIVER_BY_PART.get(id);if(full)id=full.id;
+   if(missingNaturalChunks({natural:[id]}).length){try{await ensureNaturalData({natural:[id]});}catch{toast('Не удалось загрузить геометрию. Повторите выбор.');return;}if(selected!==item.id||mode!=='edit')return;}
    if(!NATURAL_BY_ID.has(id)||state.natural.includes(id)||state.natural.length>=100)return;
    const target=NATURAL_BY_ID.get(id);
    if(target.fullRiver){
@@ -488,7 +579,7 @@ function setupNaturalPicker(item){
    if(state.excluded.includes(id))state.excluded=state.excluded.filter(link=>link!==id);
    else if(state.related.includes(id))state.related=state.related.filter(link=>link!==id);
    else if(inheritedShapes(item).some(shape=>shape.id===id))state.excluded.push(id);
-   else if(items.some(shape=>shape.id===id&&shape.geometry))state.related.push(id);
+   else if(effectiveObject(id)?.geometry)state.related.push(id);
    else return;
    changed();
  };
@@ -527,17 +618,17 @@ function setupNaturalPicker(item){
    results.replaceChildren();
    if(results.hidden)return;
    const names=new Set();
-   const candidates=[...NATURAL_LIBRARY,...items.filter(object=>object.geometry&&['river','lake'].includes(object.type)).map(object=>({...object,kind:object.type}))].filter(object=>!state.natural.includes(object.id)&&!state.related.includes(object.id)
+   const candidates=[...NATURAL_LIBRARY.map(object=>{const effective=effectiveObject(object.id);return effective?{...effective,kind:effective.kind||object.kind}:null;}).filter(Boolean),...effectiveBuiltins().map(object=>({...object,kind:object.type})),...items.filter(object=>!object.deleted&&object.id!==item.id).map(object=>({...object,kind:isCity(object)?'city':object.type}))].filter(object=>!state.natural.includes(object.id)&&!state.related.includes(object.id)&&!state.peers.includes(object.id)
      &&(kind.value==='all'||kind.value===object.kind||kind.value==='older'&&['historic','pluvial','playa'].includes(object.kind))
-     &&object.title.toLocaleLowerCase('ru').includes(text));
+     &&object.title.toLocaleLowerCase('ru').includes(text)).sort((a,b)=>{const rank=object=>{const title=object.title.toLocaleLowerCase('ru');return title===text?0:title.startsWith(text)?1:2;};return rank(a)-rank(b)||a.title.localeCompare(b.title,'ru');});
    for(const object of candidates){
      if(results.children.length>=35)break;
      const key=object.kind+':'+object.title+':'+object.id;
      if(names.has(key))continue;
      names.add(key);
      const button=document.createElement('button');
-     button.type='button';button.textContent=object.title+' · '+(object.fullRiver?'Полная река':catalogNames[object.kind]);
-     button.onclick=()=>NATURAL_BY_ID.has(object.id)?form.addNatural(object.id):form.toggleRelation(object.id);
+     button.type='button';button.textContent=object.title+' · '+(object.fullRiver?'Полная река':object.kind==='city'?'Город':catalogNames[object.kind]||TYPES[object.type]?.name||'Объект');
+     button.onclick=()=>object.kind==='city'?form.togglePeer(object.id):NATURAL_BY_ID.has(object.id)?form.addNatural(object.id):form.toggleRelation(object.id);
      results.append(button);
    }
    if(!results.children.length)results.textContent='Нет результатов';
@@ -562,7 +653,7 @@ function refreshCollectionHighlight(){
 function setupCollections(){
  const menu=$('setsPop'), button=$('setsButton');
  function populate(){
-   menu.innerHTML='<button type="button" data-set="all">Все объекты</button><button type="button" data-set="lectures">Из лекций Рогачёва</button><button type="button" data-set="work">Самостоятельные</button><button type="button" data-set="sahel">Сахель</button><button type="button" data-set="kansai">Кансай</button>'
+   menu.innerHTML='<button type="button" data-set="all">Все объекты</button><button type="button" data-set="lectures">Из лекций Рогачёва</button><button type="button" data-set="work">Самостоятельные</button><button type="button" data-set="sahel">Сахель</button>'
     +userCollections.map(set=>'<button type="button" data-set="'+esc(set.id)+'">'+esc(set.title)+'</button>').join('')
     +'<label>Лекция<select id="setLesson"><option value="">Все</option>'+[3,4,5,6,7].map(n=>'<option value="'+n+'">Лекция '+n+'</option>').join('')+'</select></label>'
     +'<label>Тип конфигурации<select id="setType"><option value="">Все типы</option>'+Object.entries(TYPES).map(([key,value])=>'<option value="'+key+'">'+value.name+'</option>').join('')+'</select></label>';
@@ -868,7 +959,7 @@ const BUILTIN_FEATURES = FEATURE_ROWS.map(([nodes,type,title,trace,area],index)=
  const geometry=fullLake?fullLake.geometry:matched?expandGeometry(matched):area
    ?{type:'Polygon',coordinates:[[...points,points[0]]]}
    :{type:'LineString',coordinates:points};
- return {id:'spatial-'+index,title,type:fullLake?'lake':type,links,geometry};
+ return fullLake?{id:'spatial-'+index,title,type:'lake',links,get geometry(){return fullLake.geometry;}}:{id:'spatial-'+index,title,type,links,geometry};
 }).filter(feature=>feature.title!=='Крокодиловая река');
 
 const MARINE_SOURCES={
@@ -1124,7 +1215,24 @@ function svgNode(tag,attrs){
  for(const [key,value] of Object.entries(attrs))el.setAttribute(key,value);
  return el;
 }
+let spatialFrame=null;
+function positionSpatialFrame(){
+ if(!spatialFrame)return;
+ const ratio=spatialFrame.k/(vis.base*vis.zoom);
+ const x=spatialFrame.width/2+wrap(vis.lon-spatialFrame.lon)*spatialFrame.k-vis.width*ratio/2;
+ const y=spatialFrame.height/2+(vis.y-spatialFrame.y)*spatialFrame.k-vis.height*ratio/2;
+ $('spatial').setAttribute('viewBox',[x,y,vis.width*ratio,vis.height*ratio].join(' '));
+ if(spatialFrame.ratio!==ratio){
+  for(const circle of $('spatial').querySelectorAll('circle[data-radius]'))circle.setAttribute('r',Number(circle.dataset.radius)*ratio);
+  for(const label of $('spatial').querySelectorAll('.shape-label')){label.style.fontSize=11*ratio+'px';label.style.strokeWidth=3.5*ratio+'px';}
+  for(const arrow of spatialFrame.arrows){const {x,y,angle,el}=arrow;const length=8*ratio;el.setAttribute('d','M'+(x-length*Math.cos(angle-.50))+' '+(y-length*Math.sin(angle-.50))+'L'+x+' '+y+'L'+(x-length*Math.cos(angle+.50))+' '+(y-length*Math.sin(angle+.50)));}
+  spatialFrame.ratio=ratio;
+ }
+}
 function renderSpatial(){
+ const signature=[spatialRevision,naturalDataVersion,selected,mode,layer,typeFilter,collectionFilter,naturalPicking,vis.base*vis.zoom>=9].join('|');
+ if(!drawing&&spatialFrame?.signature===signature&&Math.abs(vis.lon-spatialFrame.lon)<120){positionSpatialFrame();return;}
+ spatialFrame={signature,k:vis.base*vis.zoom,lon:vis.lon,y:vis.y,width:vis.width,height:vis.height,arrows:[]};
  const layerElement=$('spatial');
  const current=chosen();
  const matching=new Set(visibleItems().map(item=>item.id));
@@ -1152,11 +1260,12 @@ function renderSpatial(){
    for(const part of geometryParts(shape.geometry)){
      if(part.point){
        const [cx,cy]=point(...part.point);
-       group.append(svgNode('circle',{cx,cy,r:active?4:2.5,fill:type.tone,stroke:'#fff','stroke-width':1}));
-       if((isCustom||mode==='edit')&&!drawing&&!moving)group.append(svgNode('circle',{cx,cy,r:9,fill:'transparent',class:'feature-hit inside','data-feature':shape.id}));
+       group.append(svgNode('circle',{cx,cy,r:active?4:2.5,'data-radius':active?4:2.5,fill:type.tone,stroke:'#fff','stroke-width':1}));
+       if((isCustom||mode==='edit')&&!drawing&&!moving)group.append(svgNode('circle',{cx,cy,r:9,'data-radius':9,fill:'transparent',class:'feature-hit inside','data-feature':shape.id}));
        continue;
      }
-     const d=part.paths.map(path=>pathFor(path,part.area)).join(' ');
+     const d=part.paths.filter(path=>path.length).map(path=>pathFor(path,part.area)).join(' ');
+     if(!d)continue;
      const path=svgNode('path',{d,class:part.area?'area':'line','fill-rule':'evenodd'});
      if(shape.type==='lake'&&part.area&&(isCustom||shape.id==='draft-shape')){
        path.setAttribute('class','water-fill');group.append(path);
@@ -1169,15 +1278,16 @@ function renderSpatial(){
      }
      if((shape.type==='vector'||shape.type==='current')&&!part.area&&shape.id!=='draft-shape'){
        const points=toScreenPath(part.paths[0]);
+       if(points.length<2)continue;
        const [x,y]=points.at(-1),[px,py]=points.at(-2);
        if(Math.hypot(x-px,y-py)>8){
          const angle=Math.atan2(y-py,x-px);
          const arrow='M'+(x-8*Math.cos(angle-.50))+' '+(y-8*Math.sin(angle-.50))+'L'+x+' '+y+'L'+(x-8*Math.cos(angle+.50))+' '+(y-8*Math.sin(angle+.50));
-         group.append(svgNode('path',{d:arrow,class:'arrow'}));
+         const el=svgNode('path',{d:arrow,class:'arrow','vector-effect':'non-scaling-stroke'});group.append(el);spatialFrame.arrows.push({el,x,y,angle});
        }
      }
    }
-   if(active&&shape.id!=='draft-shape'&&vis.base*vis.zoom>=9){
+   if(active&&shape.id!=='draft-shape'&&vis.base*vis.zoom>=9&&geometryParts(shape.geometry).some(part=>part.point||part.paths?.some(path=>path.length))){
      const anchor=geometryAnchor(shape.geometry);
      const [x,y]=point(...anchor);
      const row=Math.round(x/88)+','+Math.round(y/19);
@@ -1190,6 +1300,8 @@ function renderSpatial(){
    overlay.append(group);
  }
  layerElement.replaceChildren(overlay);
+ for(const path of layerElement.querySelectorAll('path'))path.setAttribute('vector-effect','non-scaling-stroke');
+ positionSpatialFrame();
 }
 
 function relatedDiagram(item){
@@ -1199,7 +1311,7 @@ function relatedDiagram(item){
  const traces=[];
  for(const feature of linked){
    for(const part of geometryParts(feature.geometry)){
-     if(part.paths)traces.push({feature,...part});
+     if(part.paths?.some(path=>path.length))traces.push({feature,...part,paths:part.paths.filter(path=>path.length)});
    }
  }
  if(!traces.length&&!peers.length)return '';
@@ -1367,13 +1479,17 @@ function normalizeCollections(data){
  return [...collections.values()];
 }
 function loadCollections(){
- try{return normalizeCollections(JSON.parse(localStorage.getItem(COLLECTION_KEY)));}catch{return [];}
+ let result=[];try{result=normalizeCollections(JSON.parse(localStorage.getItem(COLLECTION_KEY)));}catch{}
+ if(!result.some(set=>set.title.toLocaleLowerCase('ru')==='кансай'))result.push({id:'user-kansai',title:'Кансай',cities:['lec-kyoto','lec-kobe','lec-osaka']});
+ return result;
 }
 function setupCityCollections(item,form){
  const panel=$('cityCollections');
  if(!panel)return;
  let membership=new Set(userCollections.filter(set=>set.cities.includes(item.id)).map(set=>set.id));
  const created=[];
+ if(collectionDraftOverride){membership=new Set(collectionDraftOverride.membership);created.push(...collectionDraftOverride.created);collectionDraftOverride=null;}
+ form.readCollectionsDraft=()=>({membership:[...membership],created:structuredClone(created)});
  panel.innerHTML='<label class="link-picker">Коллекции<select id="cityCollectionSelect" aria-label="Добавить в коллекцию"></select></label><div id="cityCollectionChips" class="linked-cities"></div><div class="new-collection"><input id="newCollectionName" type="text" maxlength="80" placeholder="Название коллекции" aria-label="Название коллекции"><button type="button" id="newCollectionButton">Создать</button></div>';
  const select=$('cityCollectionSelect'), name=$('newCollectionName');
  form.saveCollections=()=>{
@@ -1419,7 +1535,7 @@ const SHARED_ATLAS_URL='https://citiesconfig-sync.polzovatelskij.chatgpt.site/at
 const sharedOnline=typeof location!=='undefined'&&location.origin==='https://polzovatskijpolzovatel.github.io';
 const SYNC_DRAFT_KEY='citiesconfig-pending-v1';
 let sharedRevision=null, sharedBaseline=null, sharedRunning=false, pendingShared=null, conflictNotified=false;
-let sharedTimer=null;
+let sharedTimer=null,sharedRestoreRunning=false;
 
 function canonicalState(data){
  return {items:normalize(data.items),collections:normalizeCollections(data.collections)};
@@ -1477,11 +1593,12 @@ function enqueueSharedSave(){
    sharedTimer=setTimeout(()=>syncAtlas(true),150);
  }catch{toast('Правки сохранены на этом устройстве');}
 }
-async function fetchShared(){
- const response=await fetch(SHARED_ATLAS_URL,{cache:'no-store',credentials:'omit',signal:AbortSignal.timeout(12000)});
+async function fetchShared(force=false){
+ const response=await fetch(SHARED_ATLAS_URL+(!force&&!pendingShared&&sharedRevision!==null?'?revision='+sharedRevision:''),{cache:'no-store',credentials:'omit',signal:AbortSignal.timeout(12000)});
  if(!response.ok)throw Error('offline');
  const data=await response.json();
  if(!Number.isInteger(data.revision)||data.revision<0)throw Error('offline');
+ if(data.unchanged)return {revision:data.revision,unchanged:true,atlas:null};
  return {revision:data.revision,atlas:data.atlas?canonicalState(data.atlas):null};
 }
 function applyShared(state){
@@ -1489,14 +1606,16 @@ function applyShared(state){
  items=state.items;userCollections=state.collections;
  if(!items.some(item=>item.id===selected))selected=null;
  if(collectionFilter.startsWith('user-')&&!userCollections.some(set=>set.id===collectionFilter))collectionFilter='all';
- saveLocalAtlas();render();return true;
+ saveLocalAtlas();resetSavedUndoBaseline();render();return true;
 }
 async function syncAtlas(notify=false){
- if(sharedRunning||!pendingShared&&(dirty||drawing||naturalPicking))return;
+ if(sharedRestoreRunning||sharedRunning||!pendingShared&&(dirty||drawing||naturalPicking))return;
  sharedRunning=true;
  try{
    for(let attempt=0;attempt<3;attempt++){
      const remote=await fetchShared();
+     if(sharedRestoreRunning)return;
+     if(remote.unchanged)return;
      const work=pendingShared;
      if(!work){
        if(remote.revision!==sharedRevision&&remote.atlas&&!applyShared(remote.atlas))return;
@@ -1549,7 +1668,8 @@ function startSharedAtlas(){
    if(draft?.base&&draft?.state)pendingShared={base:canonicalState(draft.base),state:canonicalState(draft.state)};
  }catch{}
  syncAtlas();
- setInterval(syncAtlas,10000);
+ setInterval(()=>{if(document.visibilityState!=='hidden')syncAtlas();},10000);
+ document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible')syncAtlas();});
  window.addEventListener('focus',()=>syncAtlas());
  window.addEventListener('online',()=>syncAtlas(true));
 }
@@ -1633,10 +1753,6 @@ function setupCitySearch(panel,{label,excluded,select}){
  input.oninput=render;
  input.onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();results.querySelector('button')?.click();}};
  return render;
-}
-function setupPeerSearch(item){
- const panel=$('peerControls'),form=$('editorForm');
- setupCitySearch(panel,{label:'Связать с другим городом',excluded:()=>[item.id,...form.readRelations().peers],select:id=>form.togglePeer(id)});
 }
 function diagramNode(item,x,y,radius,opacity=1){
  const types=configurationTypes(item);
@@ -1814,7 +1930,7 @@ function beginGeometrySession(){
  },options);
  const finishDrag=event=>{
    if(geometryDrag?.id!==event.pointerId)return;
-   event.stopPropagation();geometryDrag=null;updatePalette();
+   event.stopPropagation();geometryDrag=null;geometryCheckpoint();updatePalette();
  };
  overlay.addEventListener('pointerup',finishDrag,options);
  overlay.addEventListener('pointercancel',finishDrag,options);
@@ -1826,7 +1942,7 @@ function beginGeometrySession(){
    event.preventDefault();event.stopPropagation();
    const path=editableGeometryPaths()[selected.path];
    if(path.points.length<=(path.pointSet?1:path.area?3:2)){toast(path.pointSet?'В объекте должна остаться хотя бы одна точка':path.area?'У контура должно остаться не меньше трёх вершин':'У линии должно остаться не меньше двух вершин');return;}
-   path.points.splice(selected.index,1);geometryDrag=null;lastVertex=null;updatePalette();refresh();
+   path.points.splice(selected.index,1);geometryCheckpoint();geometryDrag=null;lastVertex=null;updatePalette();refresh();
  },options);
 }
 function endGeometrySession(){
@@ -1854,6 +1970,154 @@ function renderGeometryHandles(){
    }
  }
  overlay.replaceChildren(fragment);
+}
+
+;
+let editorUndo={id:null,frames:[],position:-1},geometryUndo={frames:[],position:-1};
+let undoRestoring=false,undoTimer=null,collectionDraftOverride=null;
+let savedUndo=[],savedRedo=[],savedUndoBaseline=null;
+let spatialRevision=0;
+function pushUndoFrame(stack,value){
+ const frame=JSON.stringify(value);
+ if(stack.frames[stack.position]===frame)return;
+ stack.frames.splice(stack.position+1);stack.frames.push(frame);stack.position=stack.frames.length-1;
+ while(stack.frames.length>35||stack.frames.length>1&&stack.frames.reduce((n,s)=>n+s.length,0)>4000000){stack.frames.shift();stack.position--;}
+ updateUndoButtons();
+}
+function editorCheckpoint(){
+ if(undoRestoring||mode!=='edit'||drawing||!$('editorForm')||!chosen())return;
+ const item=readEditorValues();if(!item)return;
+ if(editorUndo.id!==item.id)editorUndo={id:item.id,frames:[],position:-1};
+ pushUndoFrame(editorUndo,{item,collections:$('editorForm').readCollectionsDraft?.()});
+}
+function queueEditorCheckpoint(){
+ if(undoRestoring)return;
+ clearTimeout(undoTimer);undoTimer=setTimeout(editorCheckpoint,250);
+}
+function beginEditorUndo(){
+ if(!undoRestoring)editorCheckpoint();updateUndoButtons();
+}
+function geometryCheckpoint(){
+ if(!drawing||undoRestoring)return;
+ pushUndoFrame(geometryUndo,drawing.editing?{geometry:drawing.geometry}:{points:drawing.points});
+}
+function beginGeometryUndo(){geometryUndo={frames:[],position:-1};geometryCheckpoint();}
+function atlasUndoState(){return {items:new Map(items.map(item=>[item.id,JSON.stringify(item)])),collections:new Map(userCollections.map(set=>[set.id,JSON.stringify(set)]))};}
+function resetSavedUndoBaseline(){if(mode==='edit')savedUndoBaseline=atlasUndoState();}
+function recordSavedAction(){
+ if(mode!=='edit')return;
+ const next=atlasUndoState();
+ if(!undoRestoring&&savedUndoBaseline){
+  const patch=[];
+  for(const kind of ['items','collections'])for(const id of new Set([...savedUndoBaseline[kind].keys(),...next[kind].keys()])){
+   const before=savedUndoBaseline[kind].get(id),after=next[kind].get(id);if(before!==after)patch.push({kind,id,before,after});
+  }
+  if(patch.length){savedUndo.push(patch);savedRedo=[];while(savedUndo.length>25||savedUndo.length>1&&JSON.stringify(savedUndo).length>8000000)savedUndo.shift();}
+ }
+ savedUndoBaseline=next;updateUndoButtons();
+}
+function editorUndoButtons(){return '<div class="undo-controls"><button type="button" data-undo="back" aria-label="Отменить действие" title="Отменить · Ctrl+Z">↶</button><button type="button" data-undo="forward" aria-label="Повторить действие" title="Повторить · Ctrl+Shift+Z">↷</button><button type="button" id="itemHistory">История</button></div>';}
+function canUndo(direction){
+ const stack=drawing?geometryUndo:$('editorForm')&&editorUndo.id===selected?editorUndo:null;
+ if(stack&&(direction<0?stack.position>0:stack.position<stack.frames.length-1))return true;
+ return !drawing&&(direction<0?savedUndo:savedRedo).length>0;
+}
+function updateUndoButtons(){
+ for(const button of document.querySelectorAll('[data-undo]'))button.disabled=!canUndo(button.dataset.undo==='back'?-1:1);
+}
+function stepUndo(direction){
+ clearTimeout(undoTimer);
+ if(drawing)geometryCheckpoint();else editorCheckpoint();
+ const stack=drawing?geometryUndo:$('editorForm')&&editorUndo.id===selected?editorUndo:null;
+ const index=stack?stack.position+direction:-1;
+ if(stack&&index>=0&&index<stack.frames.length){
+  stack.position=index;const frame=JSON.parse(stack.frames[index]);undoRestoring=true;
+  try{
+   if(drawing){
+    geometryDrag=null;if(drawing.editing){drawing.geometry=frame.geometry;drawing.points=editableGeometryPaths()[0]?.points||[];}else drawing.points=frame.points;
+    drawing.cursor=null;updatePalette();refresh();
+   }else{
+    const scroll=detail.scrollTop,active=document.activeElement,focusId=active?.id,caret=active?.selectionStart;
+    collectionDraftOverride=frame.collections||null;renderEditor(frame.item);
+    const focus=focusId&&$(focusId);if(focus){focus.focus({preventScroll:true});if(typeof caret==='number'&&focus.setSelectionRange){const position=Math.min(caret,focus.value.length);focus.setSelectionRange(position,position);}else if(focus.isContentEditable){const range=document.createRange();range.selectNodeContents(focus);range.collapse(false);const selection=getSelection();selection.removeAllRanges();selection.addRange(range);}}detail.scrollTop=scroll;
+    const original=chosen();editPoint={lon:frame.item.lon,lat:frame.item.lat};
+    const marker=markerEls.find(record=>record.item.id===selected);if(marker)marker.item={...original,...editPoint};dirty=true;spatialRevision++;refresh();
+   }
+  }finally{undoRestoring=false;updateUndoButtons();}
+  return;
+ }
+ const from=direction<0?savedUndo:savedRedo,to=direction<0?savedRedo:savedUndo,patch=from.at(-1);
+ if(!patch||drawing)return;
+ const expected=direction<0?'after':'before',target=direction<0?'before':'after';
+ for(const change of patch){const rows=change.kind==='items'?items:userCollections;const current=rows.find(row=>row.id===change.id);if(JSON.stringify(current)!==change[expected]){toast('Объект уже изменён. Восстановите нужную версию через историю.');return;}}
+ undoRestoring=true;
+ try{
+  for(const change of patch){let rows=change.kind==='items'?items:userCollections;rows=rows.filter(row=>row.id!==change.id);if(change[target]!==undefined)rows.push(JSON.parse(change[target]));if(change.kind==='items')items=rows;else userCollections=rows;}
+  from.pop();to.push(patch);dirty=false;editorUndo={id:null,frames:[],position:-1};if(!items.some(item=>item.id===selected))selected=null;persist();render();toast(direction<0?'Действие отменено':'Действие повторено');
+ }finally{undoRestoring=false;resetSavedUndoBaseline();updateUndoButtons();}
+}
+function setupUndo(){
+ if(!$('historyDialog'))document.body.insertAdjacentHTML('beforeend','<dialog id="historyDialog" class="history-dialog"><div class="history-header"><h2 id="historyTitle">История правок</h2><button id="historyClose" type="button" aria-label="Закрыть историю">×</button></div><div id="historyBody"></div></dialog>');
+ if(!$('historyButton'))$('dataPop').insertAdjacentHTML('afterbegin','<button id="historyButton">История правок</button>');
+ document.addEventListener('pointerdown',event=>{if(event.target.closest('[data-undo]'))event.preventDefault();});
+ document.addEventListener('click',event=>{const button=event.target.closest('[data-undo]');if(button){event.preventDefault();stepUndo(button.dataset.undo==='back'?-1:1);}});
+ document.addEventListener('keydown',event=>{
+  if(mode!=='edit'||!(event.ctrlKey||event.metaKey)||event.altKey||event.isComposing)return;
+  const key=event.key.toLowerCase();if(key!=='z'&&key!=='я'&&key!=='y'&&key!=='н')return;
+  if($('historyDialog')?.open||$('insertDialog').open||$('importDialog').open)return;
+  event.preventDefault();stepUndo(event.shiftKey||key==='y'||key==='н'?1:-1);
+ });
+ $('historyButton').onclick=()=>openAtlasHistory();
+ $('historyClose').onclick=()=>$('historyDialog').close();
+}
+let historyObject=null,historyTarget=null;
+async function historyRequest(path,options={}){
+ const response=await fetch(SHARED_ATLAS_URL+path,{credentials:'omit',cache:'no-store',signal:AbortSignal.timeout(15000),...options});
+ if(!response.ok){const error=Error(response.status===409?'conflict':'network');throw error;}return response.json();
+}
+async function openAtlasHistory(id=null){
+ if(drawing){toast('Завершите или отмените рисование');return;}
+ if(!sharedOnline){toast('Общая история доступна на опубликованном сайте');return;}
+ if(dirty&&!commit())return;
+ setNaturalPicking(false);
+ const dialog=$('historyDialog');historyObject=id;historyTarget=null;
+ $('historyTitle').textContent=id?'История · '+(effectiveObject(id)?.title||'объект'):'История правок';
+ $('historyBody').textContent='Загрузка…';dialog.showModal();
+ try{
+  const data=await historyRequest('/history'+(id?'?object='+encodeURIComponent(id):''));
+  if(!dialog.open)return;
+  $('historyBody').replaceChildren();
+  if(!data.entries.length){$('historyBody').textContent='Сохранённых версий пока нет';return;}
+  for(const entry of data.entries){
+   const row=document.createElement('button');row.className='history-entry';
+   const title=entry.changes.slice(0,4).map(change=>change.title).join(', ');
+   row.innerHTML='<strong>'+esc(new Date(entry.created_at).toLocaleString('ru-RU'))+'</strong><span>'+esc(title||'Состояние атласа')+'</span><small>Версия '+entry.revision+(entry.restored_from?' · восстановление версии '+entry.restored_from:'')+'</small>';
+   row.onclick=()=>previewHistory(entry.revision);$('historyBody').append(row);
+  }
+ }catch{$('historyBody').textContent='Не удалось загрузить историю. Закройте окно и повторите попытку.';}
+}
+async function previewHistory(revision){
+ $('historyBody').textContent='Загрузка версии…';
+ try{
+  const data=await historyRequest('/history?revision='+revision);if(!$('historyDialog').open)return;
+  historyTarget=revision;
+  const old=historyObject?data.atlas.items.find(item=>item.id===historyObject):null;
+  $('historyBody').innerHTML='<button type="button" id="historyBack">К списку версий</button><p>Версия '+revision+' · '+esc(new Date(data.created_at).toLocaleString('ru-RU'))+'</p>'+(historyObject?old?'<h3>'+esc(old.title)+'</h3>'+(customDiagram(old)||(!old.schemeAuto?scheme(old):''))+articleSections({...old,article:cleanHTML(old.article||''),sections:(old.sections||[]).map(section=>({...section,article:cleanHTML(section.article||'')}))}):'<p>В этой версии объекта ещё не было.</p>':'<p>Городов и объектов: '+data.atlas.items.filter(item=>!item.deleted).length+' · коллекций: '+data.atlas.collections.length+'</p><ul>'+data.atlas.items.filter(item=>!item.deleted).map(item=>'<li>'+esc(item.title)+'</li>').join('')+'</ul>')+(!historyObject||old?'<button type="button" id="historyRestore">'+(historyObject?'Восстановить объект':'Восстановить весь атлас')+'</button><div id="historyConfirm" hidden><p>'+(historyObject?'Текущие данные этого объекта будут заменены выбранной версией.':'Все города, объекты и коллекции будут заменены выбранной версией.')+' Нынешнее состояние останется в истории.</p><button type="button" id="historyRestoreYes">Восстановить</button><button type="button" id="historyRestoreNo">Отмена</button></div>':'');
+  $('historyBack').onclick=()=>openAtlasHistory(historyObject);
+  if($('historyRestore')){
+   $('historyRestore').onclick=()=>{$('historyConfirm').hidden=false;};$('historyRestoreNo').onclick=()=>{$('historyConfirm').hidden=true;};$('historyRestoreYes').onclick=restoreHistory;
+  }
+ }catch{$('historyBody').textContent='Не удалось загрузить версию';}
+}
+async function restoreHistory(){
+ const button=$('historyRestoreYes');button.disabled=true;
+ try{
+  if(pendingShared){await syncAtlas(true);if(pendingShared){toast('Сначала дождитесь сохранения текущих правок');button.disabled=false;return;}}
+  sharedRestoreRunning=true;
+  const remote=await fetchShared(true);
+  await historyRequest('/restore',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({revision:remote.revision,target:historyTarget,...(historyObject?{object:historyObject}:{})})});
+  dirty=false;editorUndo={id:null,frames:[],position:-1};const restored=await fetchShared(true);applyShared(restored.atlas);sharedRevision=restored.revision;sharedBaseline=structuredClone(restored.atlas);$('historyDialog').close();toast('Версия восстановлена');
+ }catch(error){toast(error.message==='conflict'?'Атлас уже изменён. Обновите историю и повторите восстановление.':'Не удалось восстановить версию');button.disabled=false;}finally{sharedRestoreRunning=false;}
 }
 
 ;
@@ -1988,6 +2252,7 @@ function saveLocalAtlas(){
  }catch{return false;}
 }
 function persist(){
+ recordSavedAction();spatialRevision++;
  const local=saveLocalAtlas();
  enqueueSharedSave();
  return local||sharedOnline;
@@ -2005,7 +2270,7 @@ function buildMap(){
  const ns='http://www.w3.org/2000/svg';
  const path=(d,attrs)=>{const el=document.createElementNS(ns,'path');el.setAttribute('d',d);for(const [k,v] of Object.entries(attrs||{}))el.setAttribute(k,v);return el;};
  const defs=document.createElementNS(ns,'defs'), scene=document.createElementNS(ns,'g');scene.id='mapScene';
- const countries=document.createElementNS(ns,'g');countries.setAttribute('fill','#edf0e2');countries.setAttribute('stroke','#9eafa1');countries.setAttribute('stroke-opacity','.65');countries.setAttribute('stroke-width','.62');countries.setAttribute('stroke-linejoin','round');countries.setAttribute('fill-rule','evenodd');
+ const countries=document.createElementNS(ns,'g');countries.id='countryPaths';countries.setAttribute('fill','#edf0e2');countries.setAttribute('stroke','#9eafa1');countries.setAttribute('stroke-opacity','.65');countries.setAttribute('stroke-width','.62');countries.setAttribute('stroke-linejoin','round');countries.setAttribute('fill-rule','evenodd');
  for(const shape of GEODATA)countries.append(path(shape,{'vector-effect':'non-scaling-stroke'}));
  scene.append(countries);
  scene.append(path(grid,{stroke:'#789389','stroke-width':'.7','stroke-dasharray':'2 4','stroke-opacity':'.23',fill:'none','vector-effect':'non-scaling-stroke'}));
@@ -2072,6 +2337,7 @@ function draw(){
  $('plus').disabled=vis.zoom>=720;$('minus').disabled=vis.zoom<=.19;
 }
 function zoomBy(factor,x=vis.width/2,y=vis.height/2){
+ clearTimeout(emptyMapCloseTimer);
  const before=unpoint(x,y);
  vis.zoom=clamp(vis.zoom*factor,.19,720);
  const k=vis.base*vis.zoom;
@@ -2153,12 +2419,16 @@ function closeDetail(){
  detail.classList.remove('sheet-expanded');
  selected=null;moving=false;editPoint=null;render();
 }
-function selectItem(id){
+let selectionLoadTicket=0;
+async function selectItem(id){
+ clearTimeout(emptyMapCloseTimer);
  if(id===selected)return;
  if(mode==='edit'&&dirty)commit();
+ if(mode==='edit'&&missingNaturalChunks(effectiveObject(id)).length){const ticket=++selectionLoadTicket;try{await ensureNaturalData(effectiveObject(id));}catch{toast('Не удалось загрузить геометрию объекта');return;}if(ticket!==selectionLoadTicket||mode!=='edit')return;}
  if(mode==='edit'&&!openObjectEditor(id))return;
  detail.classList.remove('sheet-expanded');
  selected=id;activeTool=null;moving=false;editPoint=null;dirty=false;render();
+ if(missingNaturalChunks(chosen()).length)ensureNaturalData(chosen()).then(()=>{if(selected===id&&mode==='view'&&!dirty){spatialRevision++;renderDetail();refresh();}}).catch(()=>{});
 }
 function renderDetail(){
  setNaturalPicking(false);
@@ -2203,7 +2473,7 @@ function renderEditor(item){
  detail.setAttribute('aria-label',editorLabel);
  const legacy=!item.geometry&&LINE_TYPES.has(item.type);
  const options=Object.entries(TYPES).filter(([key])=>shape||CITY_TYPES.includes(key)||key===item.type).map(([k,t])=>'<option value="'+k+'"'+(k===item.type?' selected':'')+'>'+t.name+'</option>').join('');
- detail.innerHTML='<div class="detail-inner"><div class="editor-top"><div><h2>'+esc(editorLabel)+'</h2></div><button id="closeItem" class="detail-close" aria-label="Закрыть" title="Закрыть">'+icon('close')+'</button></div><form id="editorForm"><div class="editor-fields"><label>Название<input id="itemTitle" value="'+esc(item.title)+'" maxlength="100" required></label><label>Место или страна<input id="itemPlace" value="'+esc(item.place)+'" maxlength="100" placeholder="Например, Германия"></label><label>Условный знак<select id="itemType" aria-label="Условный знак">'+options+'</select></label><div class="editor-location"><span class="coordinates" id="editCoord">'+coord(item)+'</span><button type="button" id="moveItem">'+icon('pin')+(shape?' Изменить геометрию':legacy?' Нарисовать':' Перенести')+'</button></div></div>'+(shape?'<div id="linkControls"></div>':'<div id="configurationControls"></div><div id="naturalControls"></div><div id="peerControls"></div><div id="cityCollections"></div>')+'<div id="schemeControls"></div>'+editorToolbar()+'<div id="editorText" role="textbox" aria-label="Текст статьи" aria-multiline="true" class="article-body editable" contenteditable="true" data-placeholder="Опишите, как конфигурация повлияла на появление города…">'+item.article+'</div><div id="additionalArticles"></div><div class="detail-actions editor-actions"><button type="submit" class="primary">'+icon('check')+' Сохранить</button><button type="button" id="deleteItem" class="delete">'+icon('trash')+' Удалить</button></div><div id="deleteConfirm" class="delete-confirm" hidden>Удалить знак и его статью?<br><button type="button" id="deleteYes">Удалить</button><button type="button" id="deleteNo">Отмена</button></div></form></div>';
+ detail.innerHTML='<div class="detail-inner"><div class="editor-top"><div><h2>'+esc(editorLabel)+'</h2></div><button id="closeItem" class="detail-close" aria-label="Закрыть" title="Закрыть">'+icon('close')+'</button></div><form id="editorForm"><div class="editor-fields"><label>Название<input id="itemTitle" value="'+esc(item.title)+'" maxlength="100" required></label><label>Место или страна<input id="itemPlace" value="'+esc(item.place)+'" maxlength="100" placeholder="Например, Германия"></label><label>Условный знак<select id="itemType" aria-label="Условный знак">'+options+'</select></label><div class="editor-location"><span class="coordinates" id="editCoord">'+coord(item)+'</span><button type="button" id="moveItem">'+icon('pin')+(shape?' Изменить геометрию':legacy?' Нарисовать':' Перенести')+'</button></div></div>'+(shape?'<div id="linkControls"></div>':'<div id="configurationControls"></div><div id="naturalControls"></div><div id="cityCollections"></div>')+'<div id="schemeControls"></div>'+editorToolbar()+'<div id="editorText" role="textbox" aria-label="Текст статьи" aria-multiline="true" class="article-body editable" contenteditable="true" data-placeholder="Опишите, как конфигурация повлияла на появление города…">'+item.article+'</div><div id="additionalArticles"></div><div class="detail-actions editor-actions"><button type="submit" class="primary">'+icon('check')+' Сохранить</button><button type="button" id="deleteItem" class="delete">'+icon('trash')+' Удалить</button></div><div id="deleteConfirm" class="delete-confirm" hidden>Удалить знак и его статью?<br><button type="button" id="deleteYes">Удалить</button><button type="button" id="deleteNo">Отмена</button></div></form></div>';
  $('closeItem').onclick=closeDetail;
  let links=[...(item.links||[])];
  if(shape){
@@ -2227,7 +2497,7 @@ function renderEditor(item){
      $('editorForm').renderSchemePreview?.();
    }
    renderLinks();
- }else{setupNaturalPicker(item);setupPeerSearch(item);setupCityCollections(item,$('editorForm'));}
+ }else{setupNaturalPicker(item);setupCityCollections(item,$('editorForm'));}
  $('editorForm').addEventListener('input',()=>{dirty=true;});
  $('editorForm').onsubmit=e=>{e.preventDefault();if(commit(true))closeDetail();};
  $('moveItem').onclick=()=>{
@@ -2246,12 +2516,22 @@ function renderEditor(item){
  if(!shape)setupConfigurationEditor(item);
  else $('itemType').onchange=()=>{const label=TYPES[$('itemType').value].name;detail.querySelector('.editor-top h2').textContent=label;detail.setAttribute('aria-label',label);};
  setupSchemeEditor(item);
-
+ $('editorForm').insertAdjacentHTML('afterbegin',editorUndoButtons());
+ $('itemHistory').onclick=()=>openAtlasHistory(item.id);
+ $('editorForm').addEventListener('input',queueEditorCheckpoint);
+ $('editorForm').addEventListener('change',queueEditorCheckpoint);
+ $('editorForm').addEventListener('click',queueEditorCheckpoint);
+ $('editorForm').addEventListener('pointerup',queueEditorCheckpoint);
+ beginEditorUndo();
 }
-function commit(notify=false){
+function readEditorValues(){
  const item=chosen(), input=$('itemTitle');
  if(!item||!input)return false;
- const replacement={...item,...(editPoint||{}),type:$('itemType').value,...($('editorForm').readConfigurations?.()||{}),schemeZoom:$('editorForm').readSchemeZoom?.()||item.schemeZoom||1,...($('editorForm').readSchemeView?.()||{}),customScheme:$('editorForm').readCustomScheme?.()??item.customScheme??'',title:input.value.trim()||TYPES[$('itemType').value].name,...($('editorForm').readRelations?.()||{}),place:$('itemPlace').value.trim(),...(item.geometry?{geometry:item.geometry.type==='Point'&&editPoint?{type:'Point',coordinates:[editPoint.lon,editPoint.lat]}:item.geometry,links:$('editorForm').readLinks?.()||item.links||[]}:{}),article:cleanHTML($('editorText').innerHTML)};
+ return {...item,...(editPoint||{}),type:$('itemType').value,...($('editorForm').readConfigurations?.()||{}),schemeZoom:$('editorForm').readSchemeZoom?.()||item.schemeZoom||1,...($('editorForm').readSchemeView?.()||{}),customScheme:$('editorForm').readCustomScheme?.()??item.customScheme??'',title:input.value.trim()||TYPES[$('itemType').value].name,...($('editorForm').readRelations?.()||{}),place:$('itemPlace').value.trim(),...(item.geometry?{geometry:item.geometry.type==='Point'&&editPoint?{type:'Point',coordinates:[editPoint.lon,editPoint.lat]}:item.geometry,links:$('editorForm').readLinks?.()||item.links||[]}:{}),article:cleanHTML($('editorText').innerHTML)};
+}
+function commit(notify=false){
+ const item=chosen(),input=$('itemTitle'),replacement=readEditorValues();
+ if(!replacement)return false;
  if(replacement.type==='lake'&&replacement.geometry){
    try{replacement.geometry=waterArea(replacement.geometry);}catch{toast('Для водного объекта нужны хотя бы три вершины');return false;}
  }
@@ -2278,8 +2558,13 @@ function updatePalette(){
  map.classList.toggle('placing',editing&&Boolean(activeTool||moving||drawing));
  if($('moveItem'))$('moveItem').classList.toggle('is-active',moving);
 }
-function render(){renderItems();renderDetail();updatePalette();}
-function setMode(next){
+function render(){spatialRevision++;renderItems();renderDetail();updatePalette();}
+async function setMode(next){
+ if(next==='edit'&&missingNaturalChunks(chosen()).length){
+  $('modeButton').disabled=true;
+  try{await ensureNaturalData(chosen());}catch{toast('Не удалось загрузить данные редактора. Повторите попытку.');return;}finally{$('modeButton').disabled=false;}
+ }
+ if(next==='edit'&&mode!=='edit')savedUndoBaseline=atlasUndoState();
  if(mode==='edit'&&dirty)commit();
  endGeometrySession();mode=next;activeTool=null;moving=false;drawing=null;render();
 }
@@ -2299,7 +2584,7 @@ function handleMapPosition(lon,lat){
    if(drawing.editing)return;
    const last=drawing.points.at(-1);
    if(!last||last[0]!==lon||last[1]!==lat)drawing.points.push([lon,lat]);
-   drawing.cursor=null;updatePalette();refresh();return;
+   drawing.cursor=null;geometryCheckpoint();updatePalette();refresh();return;
  }
  if(moving){setLocation(lon,lat);return;}
  if(!activeTool)return;
@@ -2312,7 +2597,7 @@ function setLocation(lon,lat){
  $('editCoord').textContent=coord(editPoint);
  const record=markerEls.find(entry=>entry.item.id===item.id);
  if(record)record.item={...item,...editPoint};
- refresh();updatePalette();
+ refresh();updatePalette();queueEditorCheckpoint();
 }
 function startDrawing(type,area,replacing=null,tool=type){
  if(dirty)commit();
@@ -2329,7 +2614,7 @@ function startDrawing(type,area,replacing=null,tool=type){
      drawing.points=editableGeometryPaths()[0]?.points||[];
    }
  }
- beginGeometrySession();
+ beginGeometrySession();beginGeometryUndo();
  activeTool=null;moving=false;detail.hidden=true;updatePalette();refresh();
 }
 function finishDrawing(){
@@ -2424,7 +2709,7 @@ function showCityChooser(candidates){
 }
 function selectCityAtTouch(x,y){
  const candidates=cityTapCandidates(x,y);hideCityChooser();
- if(!candidates.length)return;
+ if(!candidates.length){scheduleEmptyMapClose();return;}
  if(candidates.length===1){selectItem(candidates[0].item.id);return;}
  const xs=candidates.map(record=>record.x),ys=candidates.map(record=>record.y);
  const spread=Math.hypot(Math.max(...xs)-Math.min(...xs),Math.max(...ys)-Math.min(...ys));
@@ -2436,7 +2721,8 @@ function selectCityAtTouch(x,y){
 function onControl(el){return !!el.closest('button,a,.popover,[data-feature]');}
 const touchPointers=new Map();
 let pinchGesture=null;
-let suppressMapClickUntil=0;
+let suppressMapClickUntil=0,emptyMapCloseTimer=null;
+function scheduleEmptyMapClose(){clearTimeout(emptyMapCloseTimer);if(selected&&mode==='view'){const id=selected;emptyMapCloseTimer=setTimeout(()=>{if(selected===id&&mode==='view')closeDetail();},550);}}
 function beginPinch(){
  const [first,second]=[...touchPointers.values()];
  const rect=map.getBoundingClientRect();
@@ -2444,7 +2730,7 @@ function beginPinch(){
  const k=vis.base*vis.zoom;
  pinchGesture={distance:Math.max(1,Math.hypot(second.x-first.x,second.y-first.y)),zoom:vis.zoom,
    lon:vis.lon+(x-vis.width/2)/k,y:vis.y+(y-vis.height/2)/k};
- pointer=null;clearNaturalHover();suppressMapClickUntil=Date.now()+600;
+ pointer=null;clearTimeout(emptyMapCloseTimer);clearNaturalHover();suppressMapClickUntil=Date.now()+600;
 }
 function movePinch(){
  const [first,second]=[...touchPointers.values()];
@@ -2473,6 +2759,7 @@ map.addEventListener('click',e=>{
 map.addEventListener('pointerdown',e=>{
  if(e.button!==0||(onControl(e.target)&&!(mode==='view'&&e.pointerType==='touch'&&e.target.closest('.marker'))))return;
  clearCityProximity();hideCityChooser();
+ if(e.detail>=2)clearTimeout(emptyMapCloseTimer);
  if(e.pointerType==='touch'){
    touchPointers.set(e.pointerId,{x:e.clientX,y:e.clientY});
    map.setPointerCapture(e.pointerId);
@@ -2496,7 +2783,7 @@ map.addEventListener('pointermove',e=>{
  if(pointer?.id!==e.pointerId)return;
  const dx=e.clientX-pointer.x,dy=e.clientY-pointer.y;
  if(!pointer.dragged&&Math.hypot(dx,dy)<4)return;
- pointer.dragged=true;clearNaturalHover();const k=vis.base*vis.zoom;
+ pointer.dragged=true;clearTimeout(emptyMapCloseTimer);clearNaturalHover();const k=vis.base*vis.zoom;
  vis.lon=wrap(pointer.lon-dx/k);vis.y=clamp(pointer.mY-dy/k,-150,150);refresh();
 });
 map.addEventListener('pointerup',e=>{
@@ -2505,7 +2792,7 @@ map.addEventListener('pointerup',e=>{
  const wasDrag=pointer.dragged;pointer=null;map.classList.remove('grabbing');
  if(e.pointerType==='touch')suppressMapClickUntil=Date.now()+600;
  if(wasDrag)return;
- if(mode!=='edit'){if(e.pointerType==='touch'){const rect=map.getBoundingClientRect();selectCityAtTouch(e.clientX-rect.left,e.clientY-rect.top);}return;}
+ if(mode!=='edit'){if(e.pointerType==='touch'){const rect=map.getBoundingClientRect();selectCityAtTouch(e.clientX-rect.left,e.clientY-rect.top);}else if(!onControl(e.target)&&e.detail<2)scheduleEmptyMapClose();return;}
  const rect=map.getBoundingClientRect();
  if(naturalPicking){
    linkNaturalAt(e.clientX-rect.left,e.clientY-rect.top,e.pointerType==='touch'?14:8,e.altKey);
@@ -2534,10 +2821,10 @@ map.addEventListener('pointercancel',cancelMapPointer);
 map.addEventListener('lostpointercapture',cancelMapPointer);
 map.addEventListener('wheel',e=>{
  if(onControl(e.target))return;
- e.preventDefault();clearNaturalHover();const r=map.getBoundingClientRect();const delta=e.deltaY*(e.deltaMode===1?18:1);
+ e.preventDefault();clearTimeout(emptyMapCloseTimer);clearNaturalHover();const r=map.getBoundingClientRect();const delta=e.deltaY*(e.deltaMode===1?18:1);
  zoomBy(Math.exp(-clamp(delta,-150,150)*.0028),e.clientX-r.left,e.clientY-r.top-map.clientTop);
 },{passive:false});
-map.addEventListener('dblclick',e=>{if(onControl(e.target)||mode==='edit')return;const r=map.getBoundingClientRect();zoomBy(1.65,e.clientX-r.left,e.clientY-r.top-map.clientTop);});
+map.addEventListener('dblclick',e=>{clearTimeout(emptyMapCloseTimer);if(onControl(e.target)||mode==='edit')return;const r=map.getBoundingClientRect();zoomBy(1.65,e.clientX-r.left,e.clientY-r.top-map.clientTop);});
 map.addEventListener('keydown',e=>{
  if(e.target!==map)return;
  const k=vis.base*vis.zoom, distance=(e.shiftKey?108:48)/k;
@@ -2611,6 +2898,7 @@ $('finderButton').onclick=()=>{
 legendBtn.onclick=()=>togglePop(legendBtn,legendPop);
 document.addEventListener('pointerdown',e=>{for(const [btn,pop] of popovers)if(!pop.hidden&&!pop.contains(e.target)&&!btn.contains(e.target))togglePop(btn,pop,false);});
 document.addEventListener('keydown',e=>{
+ if(['AudioVolumeUp','AudioVolumeDown','VolumeUp','VolumeDown'].includes(e.key)&&!e.target.closest('input,textarea,[contenteditable=true],dialog')){clearTimeout(emptyMapCloseTimer);e.preventDefault();zoomBy(e.key.endsWith('Up')?1.4:1/1.4);return;}
  if(e.key==='Escape'&&!$('insertDialog').open&&!$('importDialog').open){for(const [button,pop] of popovers)togglePop(button,pop,false);if(naturalPicking)setNaturalPicking(false);else if(activeTool||moving||drawing)cancelDrawing();else if(chosen())closeDetail();}
  if(e.key.toLowerCase()==='s'&&(e.ctrlKey||e.metaKey)&&mode==='edit'&&chosen()&&!$('insertDialog').open&&!$('importDialog').open){e.preventDefault();if(commit(true))closeDetail();}
 });
@@ -2654,7 +2942,7 @@ $('showBathymetry').onchange=e=>{showBathymetry=e.target.checked;refresh();};
 $('showWater').onchange=e=>{showWater=e.target.checked;refresh();};
 $('showMountains').onchange=e=>{showMountains=e.target.checked;refresh();};
 $('showHistoric').onchange=e=>{showHistoric=e.target.checked;refresh();};
-setupCollections();
+setupCollections();setupUndo();
 updateIcons();buildMap();buildNaturalLayer();setBasemap('offline');render();
 new ResizeObserver(refresh).observe(map);
 startSharedAtlas();
