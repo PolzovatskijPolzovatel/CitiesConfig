@@ -1,7 +1,7 @@
 <!doctype html>
 <html lang="ru">
 <head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Карта пространственных конфигураций</title>
 <meta name="description" content="Локальный атлас пространственных конфигураций: карта, схемы и редактор заметок.">
 <style>:root{color-scheme:light;--ink:#20332b;--muted:#667469;--deep:#194e3d;--green:#22654d;--line:#e2e5db;--paper:#fffefa;--ground:#f6f6ef;--water:#dce7e3;--sans:Inter,Arial,sans-serif;--serif:Georgia,'Times New Roman',serif;--mono:'DejaVu Sans Mono',monospace}
@@ -161,10 +161,47 @@ html,body,#workspace{width:100%;height:100%;overflow:hidden}
 .scheme-scale{display:flex;gap:7px;align-items:center}.scheme-scale input{width:90px;padding:4px}.scheme-navigation{display:flex;gap:4px;flex-wrap:wrap;margin:5px 0}.scheme-navigation button{padding:4px 7px;font-size:11px}#schemePreview svg{touch-action:none;cursor:grab}#schemePreview svg:active{cursor:grabbing}
 
 #geometryHandles{position:absolute;inset:0;width:100%;height:100%;z-index:5;pointer-events:none;overflow:hidden}.geometry-edge{fill:none;stroke:transparent;stroke-width:14;pointer-events:stroke;cursor:copy}.geometry-midpoint{fill:#a8d1bc;stroke:#fff;stroke-width:1;pointer-events:all;cursor:copy}.geometry-vertex{fill:#fff;stroke:#175740;stroke-width:2;pointer-events:all;cursor:grab}.geometry-vertex:active{cursor:grabbing}#schemePreview{overscroll-behavior:contain}
+
+#markers .marker .disc{transform:scale(var(--city-scale,1));transition:transform .1s ease-out;will-change:auto}
+#markers .marker.proximity-focus{z-index:5}
+#markers .marker.proximity-focus .marker-caption[hidden],#markers .marker:focus-visible .marker-caption[hidden]{display:block!important}
+#markers .marker.proximity-focus .marker-caption{left:calc(50% + 12px)}
+.sheet-toggle{display:none}
+.city-chooser{position:absolute;z-index:12;left:50%;top:50%;transform:translate(-50%,-50%);width:min(360px,calc(100% - 24px));max-height:65%;overflow:auto;padding:8px}
+.city-choice{display:block;width:100%;min-height:44px;text-align:left;margin-top:5px;padding:9px}
+.chooser-close{display:block;margin-left:auto;width:40px;height:40px;padding:10px}
+@media(prefers-reduced-motion:reduce){#markers .marker .disc{transition:none}}
+@media(max-width:680px){
+ html,body,#workspace{height:100%;height:100dvh}
+ .navigation{top:max(9px,env(safe-area-inset-top));left:max(9px,env(safe-area-inset-left));gap:6px}
+ .navigation button.square,.navigation .zoom-controls button,.bottom-tools .square{width:44px;height:44px}
+ .bottom-tools{left:max(9px,env(safe-area-inset-left));bottom:calc(12px + env(safe-area-inset-bottom));gap:6px}
+ .finder{left:50px;width:min(335px,calc(100vw - 78px))}
+ .finder input,.finder select,#workspace>.detail input,#workspace>.detail select,#workspace>.detail textarea{font-size:16px}
+ .finder .index-button{min-height:44px;font-size:14px}
+ #workspace>.detail{top:auto;left:8px;right:8px;bottom:calc(66px + env(safe-area-inset-bottom));width:auto;max-height:56vh;max-height:56dvh;border-radius:16px;scroll-padding-top:64px}
+ #workspace>.detail.sheet-expanded,#workspace.editing>.detail{max-height:calc(100dvh - 80px - env(safe-area-inset-top) - env(safe-area-inset-bottom))}
+ #workspace>.detail .detail-inner{padding:0 16px 18px}
+ #workspace>.detail .detail-top{position:sticky;top:0;z-index:5;background:var(--paper);padding:8px 0 5px;min-height:56px;margin:0 0 8px}
+ #workspace>.detail .detail-close{min-width:44px;min-height:44px}
+ #workspace>.detail h2{font-size:30px}
+ #workspace>.detail .article-body{font-size:16px;line-height:1.6}
+ #workspace>.detail .subline{flex-wrap:wrap}
+ .sheet-toggle{position:static;display:grid;place-items:center;width:44px;height:44px;min-width:44px;padding:0;margin-left:auto;order:1;background:transparent}
+ #workspace>.detail .detail-type{order:0}
+ #workspace>.detail .detail-close{order:2}
+ #workspace>.detail{scrollbar-width:thin}
+ #workspace>.palette{left:9px;bottom:calc(65px + env(safe-area-inset-bottom));max-width:calc(100% - 18px);max-height:35dvh;overflow:auto}
+ .lower-pop{max-width:calc(100vw - 24px);max-height:65dvh;overflow:auto;min-width:0;width:max-content}
+ .lower-pop button{white-space:normal;min-height:40px}
+ dialog{max-width:calc(100vw - 20px);max-height:calc(100dvh - 24px);overflow:auto}
+ .detail-open .map-meta{display:none}
+}
 </style>
 </head>
 <body>
 <main id="workspace">
+  <div id="cityChooser" class="city-chooser popover" aria-label="Выберите город" hidden></div>
   <div id="map" class="map" tabindex="0" aria-label="Интерактивная карта. Стрелки перемещают карту, плюс и минус меняют масштаб.">
     <div id="tiles" aria-hidden="true"></div>
     <svg id="bathymetry" aria-hidden="true" hidden></svg>
