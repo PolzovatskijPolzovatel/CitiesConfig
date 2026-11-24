@@ -198,6 +198,20 @@ html,body,#workspace{width:100%;height:100%;overflow:hidden}
  .detail-open .map-meta{display:none}
  .bottom-tools:has(.popover:not([hidden])),.navigation:has(.popover:not([hidden])){z-index:10}
 }
+.undo-controls{display:flex;gap:5px;align-items:center;margin:6px 0 10px}
+.undo-controls button{min-width:36px;min-height:34px;padding:4px 8px;font-size:20px}
+.undo-controls #itemHistory{font-size:12px;margin-left:auto}
+.palette-undo{margin:5px 0 0}
+.history-dialog{width:min(580px,calc(100vw - 24px));max-height:85dvh;padding:16px;overflow:auto}
+.history-header{display:flex;align-items:center;justify-content:space-between;gap:10px;position:sticky;top:-16px;background:var(--paper);z-index:1;padding:8px 0}
+.history-header h2{margin:0;font-size:21px}
+.history-header button{width:40px;height:40px}
+.history-entry{display:grid;text-align:left;width:100%;padding:11px;gap:5px;margin-bottom:7px;font-size:14px}
+.history-entry span{font-weight:400}.history-entry small{font-size:11px;color:var(--muted)}
+#historyBody .article-body{font-size:15px}#historyBody>ul{max-height:240px;overflow:auto}
+#historyRestore,#historyRestoreYes{margin-top:12px;background:#e0eedf}
+#historyConfirm{padding:12px;border:1px solid #c8d5c8;border-radius:8px;margin-top:10px}
+@media(max-width:680px){.undo-controls button{min-width:44px;min-height:44px}.palette-undo{display:inline-flex}.history-dialog{max-height:calc(100dvh - 24px)}}
 </style>
 </head>
 <body>
@@ -230,15 +244,16 @@ html,body,#workspace{width:100%;height:100%;overflow:hidden}
     <div class="control-wrap"><button id="baseButton" class="square" data-icon="map" aria-expanded="false" aria-label="Подложка" title="Подложка"></button><div id="basePop" class="popover lower-pop" hidden><div id="baseChoices"></div><div class="map-overlays"><label><input id="showBathymetry" type="checkbox">Батиметрия · Natural Earth</label><label><input id="showWater" type="checkbox" checked>Реки и озёра</label><label><input id="showMountains" type="checkbox" checked>Горные хребты</label><label><input id="showHistoric" type="checkbox">Исторические и сухие озёра</label></div></div></div>
     <div class="control-wrap"><button id="setsButton" class="square" data-icon="collection" aria-expanded="false" aria-label="Подборки" title="Подборки"></button><div id="setsPop" class="popover lower-pop sets-pop" hidden></div></div>
     <button id="modeButton" class="square" data-icon="edit" aria-pressed="false" aria-label="Редактировать карту" title="Редактировать карту"></button>
-    <div class="control-wrap" id="dataWrap" hidden><button id="dataButton" class="square" data-icon="menu" aria-expanded="false" aria-label="Данные атласа" title="Данные атласа"></button><div class="popover lower-pop" id="dataPop" hidden><button id="geoButton" data-icon="upload">Импорт GeoJSON</button><input type="file" id="geoFile" accept=".geojson,.json,application/geo+json,application/json" hidden><button id="exportButton" data-icon="download">Скачать копию</button><button id="importButton" data-icon="upload">Открыть копию</button><input type="file" id="importFile" accept=".json,application/json" hidden></div></div>
+    <div class="control-wrap" id="dataWrap" hidden><button id="dataButton" class="square" data-icon="menu" aria-expanded="false" aria-label="Данные атласа" title="Данные атласа"></button><div class="popover lower-pop" id="dataPop" hidden><button id="historyButton">История правок</button><button id="geoButton" data-icon="upload">Импорт GeoJSON</button><input type="file" id="geoFile" accept=".geojson,.json,application/geo+json,application/json" hidden><button id="exportButton" data-icon="download">Скачать копию</button><button id="importButton" data-icon="upload">Открыть копию</button><input type="file" id="importFile" accept=".json,application/json" hidden></div></div>
   </div>
   <div class="map-meta"><div id="depthKey" hidden><span>0</span><span>200</span><span>1000</span><span>4000</span><span>10 000 м</span></div><div id="scale" class="scale"></div><div class="attribution" id="attribution"></div></div>
-  <div class="palette" id="palette" hidden><div class="tools" id="tools"></div><div class="drawing-actions" id="drawingActions" hidden><span id="paletteHelp"></span><button id="finishDrawing" type="button">Готово</button><button id="cancelDrawing" type="button">Отмена</button></div></div>
+  <div class="palette" id="palette" hidden><div class="tools" id="tools"></div><div class="undo-controls palette-undo"><button type="button" data-undo="back" aria-label="Отменить действие">↶</button><button type="button" data-undo="forward" aria-label="Повторить действие">↷</button></div><div class="drawing-actions" id="drawingActions" hidden><span id="paletteHelp"></span><button id="finishDrawing" type="button">Готово</button><button id="cancelDrawing" type="button">Отмена</button></div></div>
   <aside id="detail" class="detail" aria-label="Объект" hidden></aside>
 </main>
 <div role="status" class="toast" id="toast" hidden></div>
+<dialog id="historyDialog" class="history-dialog"><div class="history-header"><h2 id="historyTitle">История правок</h2><button id="historyClose" type="button" aria-label="Закрыть историю">×</button></div><div id="historyBody"></div></dialog>
 <dialog id="insertDialog"><form id="insertForm" method="dialog"><h2 id="insertTitle"></h2><label id="insertLabel" for="insertValue"></label><input id="insertValue" type="url" placeholder="https://…" autocomplete="off"><label id="fileWrap">Или выбрать изображение с устройства<input id="insertFile" type="file" accept="image/png,image/jpeg,image/webp,image/gif"></label><div class="dialog-actions"><button type="button" id="insertCancel">Отмена</button><button type="submit" class="primary">Вставить</button></div></form></dialog>
 <dialog id="importDialog"><form method="dialog"><h2>Открыть копию атласа?</h2><p id="importText"></p><div class="dialog-actions"><button value="cancel" autofocus>Отмена</button><button value="replace" class="primary">Открыть копию</button></div></form></dialog>
 
-<script type="module" src="./atlas.js"></script>
+<script type="module" src="./atlas.js?v=20261124-history"></script>
 </body></html>
