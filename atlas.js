@@ -2415,16 +2415,18 @@ $('layers').onclick=e=>{
 };
 $('typeSelect').onchange=e=>{typeFilter=e.target.value;applyFilter();};
 function closeDetail(){
+ selectionLoadTicket++;
  if(mode==='edit'&&dirty)commit();
  detail.classList.remove('sheet-expanded');
  selected=null;moving=false;editPoint=null;render();
 }
 let selectionLoadTicket=0;
 async function selectItem(id){
+ const ticket=++selectionLoadTicket;
  clearTimeout(emptyMapCloseTimer);
  if(id===selected)return;
  if(mode==='edit'&&dirty)commit();
- if(mode==='edit'&&missingNaturalChunks(effectiveObject(id)).length){const ticket=++selectionLoadTicket;try{await ensureNaturalData(effectiveObject(id));}catch{toast('Не удалось загрузить геометрию объекта');return;}if(ticket!==selectionLoadTicket||mode!=='edit')return;}
+ if(mode==='edit'&&missingNaturalChunks(effectiveObject(id)).length){try{await ensureNaturalData(effectiveObject(id));}catch{toast('Не удалось загрузить геометрию объекта');return;}if(ticket!==selectionLoadTicket||mode!=='edit')return;}
  if(mode==='edit'&&!openObjectEditor(id))return;
  detail.classList.remove('sheet-expanded');
  selected=id;activeTool=null;moving=false;editPoint=null;dirty=false;render();
@@ -2560,6 +2562,7 @@ function updatePalette(){
 }
 function render(){spatialRevision++;renderItems();renderDetail();updatePalette();}
 async function setMode(next){
+ selectionLoadTicket++;
  if(next==='edit'&&missingNaturalChunks(chosen()).length){
   $('modeButton').disabled=true;
   try{await ensureNaturalData(chosen());}catch{toast('Не удалось загрузить данные редактора. Повторите попытку.');return;}finally{$('modeButton').disabled=false;}
