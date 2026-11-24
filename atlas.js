@@ -1,7 +1,7 @@
 const GEO_BASE='https://citiesconfig-sync.polzovatelskij.chatgpt.site/geodata/ne-v1/';
 const response=await fetch(GEO_BASE+'core');
 if(!response.ok)throw Error('Не удалось загрузить основу карты');
-const core=await response.json();
+const core=await readGeoJSON(response);
 const GEODATA=core.GEODATA,WATER_DATA=core.WATER_DATA,WATER_MATCHES=core.WATER_MATCHES,GEO_MANIFEST=core.manifest;
 const BATHYMETRY_PACKED='';
 
@@ -210,6 +210,11 @@ for(const city of STARTERS){
 }
 
 ;
+async function readGeoJSON(response){
+ const bytes=new Uint8Array(await response.arrayBuffer());
+ if(bytes[0]===31&&bytes[1]===139){const stream=new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'));return new Response(stream).json();}
+ return JSON.parse(new TextDecoder().decode(bytes));
+}
 const progressiveData=typeof GEO_MANIFEST!=='undefined';
 let naturalDataVersion=0,geoQueue=[],geoActive=0,geoViewportTimer=null;
 const geoRequests=new Map(),geoLoaded=new Set(),bathyTileData=new Map(),bathyTileNodes=new Map();
@@ -221,7 +226,7 @@ function requestGeo(name,priority=false){
 function pumpGeo(){
  while(geoActive<3&&geoQueue.length){
   const job=geoQueue.shift();geoActive++;
-  fetch(GEO_BASE+job.name,{signal:AbortSignal.timeout(25000)}).then(response=>{if(!response.ok)throw Error('geo');return response.json();})
+  fetch(GEO_BASE+job.name,{signal:AbortSignal.timeout(25000)}).then(response=>{if(!response.ok)throw Error('geo');return readGeoJSON(response);})
    .then(data=>{geoLoaded.add(job.name);job.resolve(data);}).catch(error=>{geoRequests.delete(job.name);job.reject(error);}).finally(()=>{geoActive--;pumpGeo();});
  }
 }
